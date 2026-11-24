@@ -70,6 +70,14 @@
             </p>
           </div>
 
+          <div>
+            <label class="input-label">{{ t('setup.topology.label') }}</label>
+            <Select v-model="dataMode" :options="dataModes" :aria-label="t('setup.topology.label')" />
+            <p v-if="dataMode === 'ha'" class="mt-1 text-xs text-gray-500">
+              {{ t('setup.topology.haHint') }}
+            </p>
+          </div>
+
           <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
             <div>
               <label class="input-label">{{ t('setup.database.host') }}</label>
@@ -89,18 +97,6 @@
                 placeholder="5432"
               />
             </div>
-          </div>
-
-          <div class="flex items-center justify-between rounded-lg border border-gray-200 p-3 ">
-            <div>
-              <p class="text-sm font-medium text-gray-900 ">
-                {{ t("setup.redis.enableTls") }}
-              </p>
-              <p class="text-xs text-gray-500 ">
-                {{ t("setup.redis.enableTlsHint") }}
-              </p>
-            </div>
-            <Toggle v-model="formData.redis.enable_tls" />
           </div>
 
           <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
@@ -195,7 +191,37 @@
             </p>
           </div>
 
-          <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
+          <div v-if="dataMode === 'ha'" class="space-y-4">
+            <div>
+              <label for="setup-sentinel-master" class="input-label">{{ t('setup.redis.sentinel.master') }}</label>
+              <input id="setup-sentinel-master" v-model="sentinelForm.master_name" type="text" class="input" placeholder="nexus" />
+            </div>
+            <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
+              <div>
+                <label for="setup-sentinel-addresses" class="input-label">{{ t('setup.redis.sentinel.addresses') }}</label>
+                <textarea id="setup-sentinel-addresses" v-model="sentinelForm.addresses" class="input" rows="3"
+                  placeholder="data1.internal:26379, data2.internal:26379, entry1.internal:26379" />
+              </div>
+              <div>
+                <label for="setup-sentinel-primaries" class="input-label">{{ t('setup.redis.sentinel.primaries') }}</label>
+                <textarea id="setup-sentinel-primaries" v-model="sentinelForm.allowed_primaries" class="input" rows="3"
+                  placeholder="data1.internal:6379, data2.internal:6379" />
+              </div>
+              <div>
+                <label for="setup-sentinel-user" class="input-label">{{ t('setup.redis.sentinel.username') }}</label>
+                <input id="setup-sentinel-user" v-model="sentinelForm.username" type="text" class="input" autocomplete="off" />
+              </div>
+              <div>
+                <label for="setup-sentinel-password" class="input-label">{{ t('setup.redis.sentinel.password') }}</label>
+                <input id="setup-sentinel-password" v-model="sentinelForm.password" type="password" class="input" autocomplete="new-password" />
+              </div>
+            </div>
+            <label class="flex items-center justify-between rounded-lg border border-gray-200 p-3">
+              <span class="text-sm font-medium text-gray-900">{{ t('setup.redis.sentinel.tls') }}</span>
+              <Toggle v-model="sentinelForm.enable_tls" />
+            </label>
+          </div>
+          <div v-else class="grid grid-cols-1 gap-4 sm:grid-cols-2">
             <div>
               <label class="input-label">{{ t('setup.redis.host') }}</label>
               <input
@@ -375,7 +401,10 @@
               <h3 class="mb-2 text-sm font-medium text-gray-500 ">
                 {{ t('setup.ready.redis') }}
               </h3>
-              <p class="text-gray-900 ">
+              <p v-if="redisConfig.sentinel" class="break-words text-gray-900">
+                {{ redisConfig.sentinel.master_name }} · {{ redisConfig.sentinel.addresses.join(', ') }}
+              </p>
+              <p v-else class="text-gray-900 ">
                 {{ formData.redis.host }}:{{ formData.redis.port }}
               </p>
             </div>
@@ -499,9 +528,9 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed } from 'vue'
+import { ref, reactive, computed, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { testDatabase, testRedis, install, type InstallRequest } from '@/api/setup'
+import { testDatabase, testRedis, install, type InstallRequest, type RedisConfig } from '@/api/setup'
 import { buildGatewayUrl } from '@/api/client'
 import Select from '@/components/common/Select.vue'
 import Toggle from '@/components/common/Toggle.vue'
@@ -528,6 +557,15 @@ const redisConnected = ref(false)
 const installing = ref(false)
 const confirmPassword = ref('')
 const serviceReady = ref(false)
+const dataMode = ref<'single' | 'ha' | 'managed'>('single')
+const dataModes = computed(() => [
+  { value: 'single', label: t('setup.topology.single') },
+  { value: 'ha', label: t('setup.topology.ha') },
+  { value: 'managed', label: t('setup.topology.managed') }
+])
+const sentinelForm = reactive({
+  master_name: 'nexus', addresses: '', allowed_primaries: '', username: '', password: '', enable_tls: false
+})
 
 // Default server port
 const getCurrentPort = (): number => {
@@ -567,6 +605,31 @@ const formData = reactive<InstallRequest>({
   }
 })
 
+const splitEndpoints = (text: string) => text.split(/[,\n]/).map(endpoint => endpoint.trim()).filter(Boolean)
+const redisConfig = computed<RedisConfig>(() => {
+  if (dataMode.value !== 'ha') return { ...formData.redis }
+  return {
+    ...formData.redis,
+    host: '',
+    port: 0,
+    sentinel: {
+      ...sentinelForm,
+      master_name: sentinelForm.master_name.trim(),
+      addresses: splitEndpoints(sentinelForm.addresses),
+      allowed_primaries: splitEndpoints(sentinelForm.allowed_primaries)
+    }
+  }
+})
+
+watch(dataMode, mode => {
+  formData.database.sslmode = mode === 'managed' ? 'verify-full' : 'disable'
+  formData.redis.enable_tls = mode === 'managed'
+  dbConnected.value = false
+  redisConnected.value = false
+})
+watch(() => formData.database, () => { dbConnected.value = false }, { deep: true })
+watch(redisConfig, () => { redisConnected.value = false })
+
 const canProceed = computed(() => {
   switch (currentStep.value) {
     case 0:
@@ -590,8 +653,10 @@ async function testDatabaseConnection() {
   dbConnected.value = false
 
   try {
-    await testDatabase(formData.database)
-    dbConnected.value = true
+    const candidate = { ...formData.database }
+    const mode = dataMode.value
+    await testDatabase(candidate)
+    dbConnected.value = mode === dataMode.value && JSON.stringify(candidate) === JSON.stringify(formData.database)
   } catch (error: unknown) {
     const err = error as { response?: { data?: { detail?: string; message?: string } }; message?: string }
     errorMessage.value =
@@ -607,8 +672,9 @@ async function testRedisConnection() {
   redisConnected.value = false
 
   try {
-    await testRedis(formData.redis)
-    redisConnected.value = true
+    const candidate = redisConfig.value
+    await testRedis(candidate)
+    redisConnected.value = JSON.stringify(candidate) === JSON.stringify(redisConfig.value)
   } catch (error: unknown) {
     const err = error as { response?: { data?: { detail?: string; message?: string } }; message?: string }
     errorMessage.value =
@@ -630,7 +696,7 @@ async function performInstall() {
   errorMessage.value = ''
 
   try {
-    await install(formData)
+    await install({ ...formData, redis: redisConfig.value })
     installSuccess.value = true
     // Start polling for service restart
     waitForServiceRestart()

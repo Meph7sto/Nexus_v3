@@ -1,0 +1,11 @@
+# Merge this section into the initialized config.yaml of each Entry.
+# On all Entries, point database and Redis at the same initialized Data.
+entry_node:
+  cluster_enabled: true
+  id: control-a
+  name: Control A
+  role: control_only
+  shared_task_owner_id: control-a
+
+# For the serving Entry, set a distinct id (e.g. gateway-a) and role:
+# gateway_only. Keep shared_task_owner_id equal to control-a on both.

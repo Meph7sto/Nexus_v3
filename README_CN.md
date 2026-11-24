@@ -321,6 +321,8 @@ fast_mode = true
 
 ## 部署方式
 
+V3 保留原有[全合一部署](deploy/all-in-one/README.md)。分开运行进程时，参见 [Entry / Worker 部署](deploy/network/README.md)、[PostgreSQL 高可用](deploy/data/ha/README.md)和 [Redis Sentinel](deploy/data/ha/redis-sentinel.md)。
+
 ### 方式一：脚本安装（推荐）
 
 一键安装脚本，自动从 GitHub Releases 下载预编译的二进制文件。

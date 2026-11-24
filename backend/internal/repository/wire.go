@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"time"
 
 	entsql "entgo.io/ent/dialect/sql"
 	"github.com/Wei-Shaw/sub2api/ent"
@@ -12,6 +13,20 @@ import (
 	"github.com/google/wire"
 	"github.com/redis/go-redis/v9"
 )
+
+func ProvideHTTPUpstream(cfg *config.Config) (service.HTTPUpstream, error) {
+	local := NewHTTPUpstream(cfg)
+	if !cfg.WorkerPool.Enabled && !cfg.EntryNode.ClusterEnabled {
+		return local, nil
+	}
+	pool := cfg.WorkerPool
+	if cfg.EntryNode.ClusterEnabled {
+		// The clustered process must register before routing via any Worker.
+		pool = config.WorkerPoolConfig{}
+	}
+	pool.DrainTimeout = time.Duration(cfg.Gateway.StreamDataIntervalTimeout) * time.Second
+	return NewDistributedHTTPUpstream(local, pool)
+}
 
 // ProvideConcurrencyCache 创建并发控制缓存，从配置读取 TTL 参数
 // 性能优化：TTL 可配置，支持长时间运行的 LLM 请求场景
@@ -166,7 +181,7 @@ var ProviderSet = wire.NewSet(
 	NewProxyExitInfoProber,
 	NewClaudeUsageFetcher,
 	NewClaudeOAuthClient,
-	NewHTTPUpstream,
+	ProvideHTTPUpstream,
 	NewOpenAIOAuthClient,
 	NewOpenAIReferralClient,
 	NewGrokOAuthClient,

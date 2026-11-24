@@ -44,6 +44,12 @@ type ScheduledTestPlanRepository interface {
 	UpdateAfterRun(ctx context.Context, id int64, lastRunAt time.Time, nextRunAt time.Time) error
 }
 
+// ScheduledTestPlanClaimRepository consumes a known due occurrence before an
+// upstream test starts, so a crashed or replaced Entry cannot replay it.
+type ScheduledTestPlanClaimRepository interface {
+	ClaimDue(ctx context.Context, id int64, dueAt, attemptedAt, nextRunAt time.Time) (bool, error)
+}
+
 // ScheduledTestResultRepository defines the data access interface for test results.
 type ScheduledTestResultRepository interface {
 	Create(ctx context.Context, result *ScheduledTestResult) (*ScheduledTestResult, error)

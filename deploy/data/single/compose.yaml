@@ -1,0 +1,46 @@
+services:
+  postgres:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_USER: "${POSTGRES_USER:-nexus}"
+      POSTGRES_DB: "${POSTGRES_DB:-nexus}"
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+      POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256"
+    command: ["postgres", "-c", "max_connections=50", "-c", "shared_buffers=128MB", "-c", "maintenance_work_mem=32MB"]
+    ports:
+      - "${DATA_BIND_IP:?set the private Data host IP}:5432:5432"
+    secrets:
+      - postgres_password
+    volumes:
+      - postgres_data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+    mem_limit: 512m
+    cpus: "0.6"
+    restart: unless-stopped
+
+  redis:
+    image: redis:8-alpine
+    command: ["redis-server", "--protected-mode", "yes", "--aclfile", "/run/secrets/redis_acl", "--appendonly", "yes", "--maxmemory", "192mb", "--maxmemory-policy", "noeviction"]
+    ports:
+      - "${DATA_BIND_IP:?set the private Data host IP}:6379:6379"
+    secrets:
+      - redis_acl
+    volumes:
+      - redis_data:/data
+    mem_limit: 320m
+    cpus: "0.3"
+    restart: unless-stopped
+
+secrets:
+  postgres_password:
+    file: "${POSTGRES_PASSWORD_FILE:?set POSTGRES_PASSWORD_FILE to a private file}"
+  redis_acl:
+    file: "${REDIS_ACL_FILE:?set REDIS_ACL_FILE to a private ACL file}"
+
+volumes:
+  postgres_data:
+  redis_data:

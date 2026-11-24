@@ -1,0 +1,31 @@
+services:
+  worker:
+    image: "${WORKER_IMAGE:-nexus-worker:local}"
+    build:
+      context: ../..
+      dockerfile: deploy/worker/Dockerfile
+    env_file:
+      - "${WORKER_ENV_FILE:?set WORKER_ENV_FILE to a private environment file}"
+    environment:
+      WORKER_LISTEN_ADDR: 0.0.0.0:9090
+      WORKER_NODE_ID: "${WORKER_NODE_ID:?set the Worker ID}"
+      WORKER_SHARED_TOKEN_FILE: /run/nexus-worker-secrets/shared-token
+      WORKER_ALLOWED_TARGETS: api.openai.com
+      WORKER_MAX_INFLIGHT: "${WORKER_MAX_INFLIGHT:-32}"
+      WORKER_MAX_CONNECTIONS: "${WORKER_MAX_CONNECTIONS:-64}"
+      WORKER_DRAIN_TIMEOUT: "${WORKER_DRAIN_TIMEOUT:-2m}"
+      GOMEMLIMIT: "${WORKER_GOMEMLIMIT:-700MiB}"
+      GOGC: "${WORKER_GOGC:-70}"
+    ports:
+      - "${WORKER_BIND_IP:?set the private Worker host IP}:9090:9090"
+    volumes:
+      - "${WORKER_SECRETS_DIR:?set WORKER_SECRETS_DIR}:/run/nexus-worker-secrets:ro"
+    stop_grace_period: "${WORKER_STOP_GRACE_PERIOD:-135s}"
+    mem_limit: "${WORKER_MEMORY_LIMIT:-900m}"
+    cpus: "${WORKER_CPU_LIMIT:-1.0}"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped

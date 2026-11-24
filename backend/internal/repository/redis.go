@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/redisconn"
 
 	"github.com/redis/go-redis/v9"
 )
@@ -21,7 +22,12 @@ import (
 // 2. MinIdleConns: 保持最小空闲连接，减少冷启动延迟（默认 10）
 // 3. DialTimeout/ReadTimeout/WriteTimeout: 精确控制各阶段超时
 func InitRedis(cfg *config.Config) *redis.Client {
-	client := redis.NewClient(buildRedisOptions(cfg))
+	var client *redis.Client
+	if cfg.Redis.Sentinel.Configured() {
+		client = redisconn.NewFailover(cfg.Redis)
+	} else {
+		client = redis.NewClient(buildRedisOptions(cfg))
+	}
 	if cfg.Server.EnableServerTiming {
 		client.AddHook(serverTimingRedisHook{})
 	}

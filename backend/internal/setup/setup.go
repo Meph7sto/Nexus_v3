@@ -15,6 +15,7 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/redisconn"
 	"github.com/Wei-Shaw/sub2api/internal/repository"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 
@@ -97,12 +98,13 @@ type DatabaseConfig struct {
 }
 
 type RedisConfig struct {
-	Host      string `json:"host" yaml:"host"`
-	Port      int    `json:"port" yaml:"port"`
-	Username  string `json:"username" yaml:"username"`
-	Password  string `json:"password" yaml:"password"`
-	DB        int    `json:"db" yaml:"db"`
-	EnableTLS bool   `json:"enable_tls" yaml:"enable_tls"`
+	Host      string                     `json:"host" yaml:"host"`
+	Port      int                        `json:"port" yaml:"port"`
+	Username  string                     `json:"username" yaml:"username"`
+	Password  string                     `json:"password" yaml:"password"`
+	DB        int                        `json:"db" yaml:"db"`
+	EnableTLS bool                       `json:"enable_tls" yaml:"enable_tls"`
+	Sentinel  config.RedisSentinelConfig `json:"sentinel" yaml:"sentinel,omitempty"`
 }
 
 type AdminConfig struct {
@@ -279,6 +281,9 @@ func testDatabaseConnection(cfg *DatabaseConfig, openDatabase postgresDatabaseOp
 
 // TestRedisConnection tests the Redis connection
 func TestRedisConnection(cfg *RedisConfig) error {
+	if err := cfg.Sentinel.Validate(); err != nil {
+		return err
+	}
 	opts := &redis.Options{
 		Addr:     fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
 		Username: cfg.Username,
@@ -293,7 +298,16 @@ func TestRedisConnection(cfg *RedisConfig) error {
 		}
 	}
 
-	rdb := redis.NewClient(opts)
+	var rdb *redis.Client
+	if cfg.Sentinel.Configured() {
+		rdb = redisconn.NewFailover(config.RedisConfig{
+			Username: cfg.Username, Password: cfg.Password, DB: cfg.DB,
+			EnableTLS: cfg.EnableTLS, Sentinel: cfg.Sentinel,
+			DialTimeoutSeconds: 3, ReadTimeoutSeconds: 3, WriteTimeoutSeconds: 3, PoolSize: 1,
+		})
+	} else {
+		rdb = redis.NewClient(opts)
+	}
 	defer func() {
 		if err := rdb.Close(); err != nil {
 			logger.LegacyPrintf("setup", "failed to close redis client: %v", err)
@@ -305,6 +319,17 @@ func TestRedisConnection(cfg *RedisConfig) error {
 
 	if err := rdb.Ping(ctx).Err(); err != nil {
 		return fmt.Errorf("ping failed: %w", err)
+	}
+	if cfg.Sentinel.Configured() {
+		nonce, err := generateSecret(16)
+		if err != nil {
+			return fmt.Errorf("create Redis probe: %w", err)
+		}
+		key := "nexus:setup:redis-probe:" + nonce
+		if err := rdb.Set(ctx, key, "ok", 10*time.Second).Err(); err != nil {
+			return fmt.Errorf("Sentinel primary is not writable: %w", err)
+		}
+		_ = rdb.Del(ctx, key).Err()
 	}
 
 	return nil
@@ -641,6 +666,14 @@ func AutoSetupFromEnv() error {
 			Password:  getEnvOrDefault("REDIS_PASSWORD", ""),
 			DB:        getEnvIntOrDefault("REDIS_DB", 0),
 			EnableTLS: getEnvOrDefault("REDIS_ENABLE_TLS", "false") == "true",
+			Sentinel: config.RedisSentinelConfig{
+				Addresses:        splitRedisEndpoints(os.Getenv("REDIS_SENTINEL_ADDRESSES")),
+				AllowedPrimaries: splitRedisEndpoints(os.Getenv("REDIS_SENTINEL_ALLOWED_PRIMARIES")),
+				MasterName:       os.Getenv("REDIS_SENTINEL_MASTER_NAME"),
+				Username:         os.Getenv("REDIS_SENTINEL_USERNAME"),
+				Password:         os.Getenv("REDIS_SENTINEL_PASSWORD"),
+				EnableTLS:        getEnvOrDefault("REDIS_SENTINEL_ENABLE_TLS", "false") == "true",
+			},
 		},
 		Admin: AdminConfig{
 			Email:    getEnvOrDefault("ADMIN_EMAIL", ""),
@@ -724,4 +757,11 @@ func AutoSetupFromEnv() error {
 
 	logger.LegacyPrintf("setup", "%s", "Auto setup completed successfully!")
 	return nil
+}
+
+func splitRedisEndpoints(raw string) []string {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	return strings.Split(raw, ",")
 }

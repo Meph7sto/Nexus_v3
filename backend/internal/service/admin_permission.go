@@ -59,6 +59,7 @@ const (
 	AdminResourcePaymentSettings        AdminPermissionResource = "payment_settings"
 	AdminResourceDataManagement         AdminPermissionResource = "data_management"
 	AdminResourceBackups                AdminPermissionResource = "backups"
+	AdminResourceCluster                AdminPermissionResource = "cluster"
 	AdminResourceSettings               AdminPermissionResource = "settings"
 	AdminResourceSystem                 AdminPermissionResource = "system"
 	AdminResourceErrorPassthroughRules  AdminPermissionResource = "error_passthrough_rules"
@@ -124,6 +125,7 @@ var adminPermissionDefinitions = []AdminPermissionDefinition{
 	{AdminResourcePaymentSettings, "Payment Settings", []AdminPermissionAction{AdminActionView, AdminActionUpdate}, false},
 	{AdminResourceDataManagement, "Data Management", allAdminPermissionActions, false},
 	{AdminResourceBackups, "Backups", allAdminPermissionActions, false},
+	{AdminResourceCluster, "Cluster", allAdminPermissionActions, true},
 	{AdminResourceSettings, "Settings", allAdminPermissionActions, true},
 	{AdminResourceSystem, "System", allAdminPermissionActions, true},
 	{AdminResourceErrorPassthroughRules, "Error Passthrough Rules", allAdminPermissionActions, false},

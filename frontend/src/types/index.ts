@@ -75,6 +75,7 @@ export type AdminPermissionResource =
   | 'payment_settings'
   | 'data_management'
   | 'backups'
+  | 'cluster'
   | 'settings'
   | 'system'
   | 'error_passthrough_rules'

@@ -7,6 +7,7 @@ This directory contains files for deploying Nexus on Linux servers and Apple-sil
 | Method | Best For | Setup Wizard |
 |--------|----------|--------------|
 | **Docker Compose** | Quick setup, all-in-one | Not needed (auto-setup) |
+| **[Private Worker pilot](./network/README.md)** | Separate Entry, Workers and Data | Existing Entry setup |
 | **Apple container** | Native local stack on macOS 26 | Not needed (auto-setup) |
 | **Binary Install** | Production servers, systemd | Web-based wizard |
 

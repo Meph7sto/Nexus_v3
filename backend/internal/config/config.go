@@ -92,6 +92,9 @@ type Config struct {
 	RateLimit               RateLimitConfig               `mapstructure:"rate_limit"`
 	Pricing                 PricingConfig                 `mapstructure:"pricing"`
 	Gateway                 GatewayConfig                 `mapstructure:"gateway"`
+	WorkerPool              WorkerPoolConfig              `mapstructure:"worker_pool"`
+	EntryNode               EntryNodeConfig               `mapstructure:"entry_node"`
+	ClusterData             ClusterDataConfig             `mapstructure:"cluster_data"`
 	APIKeyAuth              APIKeyAuthCacheConfig         `mapstructure:"api_key_auth_cache"`
 	APIKeyCreate            APIKeyCreateConfig            `mapstructure:"api_key_create"`
 	SubscriptionCache       SubscriptionCacheConfig       `mapstructure:"subscription_cache"`
@@ -1725,7 +1728,8 @@ type RedisConfig struct {
 	// MinIdleConns: 最小空闲连接数，保持热连接减少冷启动延迟
 	MinIdleConns int `mapstructure:"min_idle_conns"`
 	// EnableTLS: 是否启用 TLS/SSL 连接
-	EnableTLS bool `mapstructure:"enable_tls"`
+	EnableTLS bool                `mapstructure:"enable_tls"`
+	Sentinel  RedisSentinelConfig `mapstructure:"sentinel"`
 }
 
 func (r *RedisConfig) Address() string {
@@ -2163,6 +2167,25 @@ func configureConfigSource(setConfigFile, addConfigPath func(string)) {
 }
 
 func setDefaults() {
+	viper.SetDefault("entry_node.cluster_enabled", false)
+	viper.SetDefault("entry_node.id", "")
+	viper.SetDefault("entry_node.name", "")
+	viper.SetDefault("entry_node.role", EntryRoleAll)
+	viper.SetDefault("entry_node.shutdown_timeout", "2m")
+	viper.SetDefault("entry_node.shared_task_owner_id", "")
+	viper.SetDefault("worker_pool.enabled", false)
+	viper.SetDefault("worker_pool.fallback_local", false)
+	viper.SetDefault("worker_pool.allow_private_h2c", false)
+	viper.SetDefault("worker_pool.default_proxy_url", "")
+	viper.SetDefault("worker_pool.tls_ca_file", "")
+	viper.SetDefault("worker_pool.tls_cert_file", "")
+	viper.SetDefault("worker_pool.tls_key_file", "")
+	viper.SetDefault("worker_pool.health_interval", 5*time.Second)
+	viper.SetDefault("worker_pool.health_timeout", 2*time.Second)
+	viper.SetDefault("worker_pool.max_attempts", 2)
+	viper.SetDefault("worker_pool.selection_policy", "least_inflight_affinity")
+	viper.SetDefault("worker_pool.circuit_failure_threshold", 3)
+	viper.SetDefault("worker_pool.circuit_open_timeout", 15*time.Second)
 	viper.SetDefault("run_mode", RunModeStandard)
 	viper.SetDefault("gateway.min_output_tokens", 128)
 	viper.SetDefault("simple_mode.auto_create_default_groups", true)
@@ -2368,6 +2391,12 @@ func setDefaults() {
 	viper.SetDefault("redis.pool_size", 1024)
 	viper.SetDefault("redis.min_idle_conns", 128)
 	viper.SetDefault("redis.enable_tls", false)
+	viper.SetDefault("redis.sentinel.addresses", []string{})
+	viper.SetDefault("redis.sentinel.allowed_primaries", []string{})
+	viper.SetDefault("redis.sentinel.master_name", "")
+	viper.SetDefault("redis.sentinel.username", "")
+	viper.SetDefault("redis.sentinel.password", "")
+	viper.SetDefault("redis.sentinel.enable_tls", false)
 
 	// Batch Image queue
 	viper.SetDefault("batch_image.enabled", false)
@@ -2858,6 +2887,12 @@ func setEnvReachableDefaults() {
 }
 
 func (c *Config) Validate() error {
+	if err := c.EntryNode.validate(); err != nil {
+		return err
+	}
+	if err := c.WorkerPool.validate(); err != nil {
+		return err
+	}
 	if c.Gateway.MinOutputTokens < 16 {
 		return fmt.Errorf("gateway.min_output_tokens must be at least 16")
 	}
@@ -3307,6 +3342,9 @@ func (c *Config) Validate() error {
 	}
 	if c.Redis.MinIdleConns > c.Redis.PoolSize {
 		return fmt.Errorf("redis.min_idle_conns cannot exceed redis.pool_size")
+	}
+	if err := c.Redis.Sentinel.Validate(); err != nil {
+		return err
 	}
 	if c.BatchImage.QueueEnabled {
 		if strings.TrimSpace(c.BatchImage.QueueReadyKey) == "" {

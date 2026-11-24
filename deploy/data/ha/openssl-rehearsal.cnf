@@ -1,0 +1,6 @@
+[req]
+distinguished_name = local_fixture
+prompt = no
+
+[local_fixture]
+commonName = Nexus local HA rehearsal

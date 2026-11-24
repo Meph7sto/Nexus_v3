@@ -115,6 +115,16 @@ func TestAdminRoutePermissionManifestSeparatesUsageInteractionContentAndRaw(t *t
 	require.True(t, raw.HumanOnly)
 }
 
+func TestAdminRoutePermissionManifestRestrictsOfflineClusterRecovery(t *testing.T) {
+	for _, path := range []string{"/entries/:id/retire-offline", "/workers/:id/forget-offline"} {
+		permission, ok := AdminRoutePermissionFor(http.MethodPost, "/api/v1/admin/cluster"+path)
+		require.True(t, ok)
+		require.Equal(t, service.AdminResourceCluster, permission.Resource)
+		require.Equal(t, service.AdminActionDelete, permission.Action)
+		require.True(t, permission.HumanOnly)
+	}
+}
+
 func TestAdminRoutePermissionManifestMapsMonthlyLedgerActions(t *testing.T) {
 	tests := []struct {
 		method string

@@ -491,6 +491,21 @@ func TestLoadForBootstrapAllowsMissingJWTSecret(t *testing.T) {
 	}
 }
 
+func TestEntryNodeShutdownTimeout(t *testing.T) {
+	resetViperWithJWTSecret(t)
+	t.Setenv("ENTRY_NODE_SHUTDOWN_TIMEOUT", "")
+	cfg, err := LoadForBootstrap()
+	require.NoError(t, err)
+	require.Equal(t, 2*time.Minute, cfg.EntryNode.ShutdownTimeout)
+	t.Setenv("ENTRY_NODE_SHUTDOWN_TIMEOUT", "190s")
+	cfg, err = LoadForBootstrap()
+	require.NoError(t, err)
+	require.Equal(t, 190*time.Second, cfg.EntryNode.ShutdownTimeout)
+	t.Setenv("ENTRY_NODE_SHUTDOWN_TIMEOUT", "-1s")
+	_, err = LoadForBootstrap()
+	require.ErrorContains(t, err, "shutdown_timeout")
+}
+
 func TestNormalizeRunMode(t *testing.T) {
 	tests := []struct {
 		input    string

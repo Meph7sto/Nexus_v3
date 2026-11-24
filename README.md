@@ -295,6 +295,8 @@ Nginx drops headers containing underscores by default (e.g. `session_id`), which
 
 ## Deployment
 
+V3 keeps the existing [all-in-one deployment](deploy/all-in-one/README.md). For separate roles, see [Entry and Worker](deploy/network/README.md), [PostgreSQL HA](deploy/data/ha/README.md), and [Redis Sentinel](deploy/data/ha/redis-sentinel.md).
+
 ### Method 1: Script Installation (Recommended)
 
 One-click installation script that downloads pre-built binaries from GitHub Releases.

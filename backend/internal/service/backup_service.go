@@ -165,6 +165,7 @@ type BackupService struct {
 	encryptionKeyConfigured bool
 	storeFactory            BackupObjectStoreFactory
 	dumper                  DBDumper
+	scheduledTasks          *SharedTaskGate
 
 	opMu      sync.Mutex // 保护 backingUp/restoring 标志
 	backingUp bool
@@ -474,6 +475,9 @@ func (s *BackupService) GetSchedule(ctx context.Context) (*BackupScheduleConfig,
 }
 
 func (s *BackupService) UpdateSchedule(ctx context.Context, cfg BackupScheduleConfig) (*BackupScheduleConfig, error) {
+	if !s.scheduledTasks.Running() {
+		return nil, infraerrors.Conflict("ENTRY_TASK_OWNER_REQUIRED", "Change the backup schedule on the Entry that owns shared tasks")
+	}
 	if err := validateBackupRetention(&cfg); err != nil {
 		return nil, err
 	}

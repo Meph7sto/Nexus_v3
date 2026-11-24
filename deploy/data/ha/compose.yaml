@@ -1,0 +1,125 @@
+x-etcd-env: &etcd-env
+  ETCD_DATA_DIR: /etcd-data
+  ETCD_LISTEN_CLIENT_URLS: https://0.0.0.0:2379
+  ETCD_LISTEN_PEER_URLS: https://0.0.0.0:2380
+  ETCD_INITIAL_CLUSTER: "etcd-1=https://${HA_ETCD1_HOST:-etcd-1}:2380,etcd-2=https://${HA_ETCD2_HOST:-etcd-2}:2380,etcd-3=https://${HA_ETCD3_HOST:-etcd-3}:2380"
+  ETCD_INITIAL_CLUSTER_TOKEN: "${HA_ETCD_CLUSTER_TOKEN:?set a stable unique etcd cluster token}"
+  ETCD_INITIAL_CLUSTER_STATE: new
+  ETCD_CERT_FILE: /run/etcd-tls/server.crt
+  ETCD_KEY_FILE: /run/etcd-tls/server.key
+  ETCD_TRUSTED_CA_FILE: /run/etcd-tls/ca.crt
+  ETCD_CLIENT_CERT_AUTH: "true"
+  ETCD_PEER_CERT_FILE: /run/etcd-tls/server.crt
+  ETCD_PEER_KEY_FILE: /run/etcd-tls/server.key
+  ETCD_PEER_TRUSTED_CA_FILE: /run/etcd-tls/ca.crt
+  ETCD_PEER_CLIENT_CERT_AUTH: "true"
+  ETCD_AUTO_COMPACTION_MODE: periodic
+  ETCD_AUTO_COMPACTION_RETENTION: 3h
+  ETCD_QUOTA_BACKEND_BYTES: "134217728"
+  GOMEMLIMIT: 128MiB
+
+x-etcd: &etcd
+  image: quay.io/coreos/etcd:v3.6.7
+  entrypoint: ["/usr/local/bin/etcd"]
+  networks: [ha]
+  mem_limit: 192m
+  cpus: "0.25"
+  restart: unless-stopped
+  security_opt: [no-new-privileges:true]
+
+x-patroni-env: &patroni-env
+  HA_ETCD1_HOST: "${HA_ETCD1_HOST:-etcd-1}"
+  HA_ETCD2_HOST: "${HA_ETCD2_HOST:-etcd-2}"
+  HA_ETCD3_HOST: "${HA_ETCD3_HOST:-etcd-3}"
+  HA_PG_MODE: "${HA_PG_MODE:-sync_strict}"
+  HA_SCOPE: "${HA_SCOPE:-nexus-postgres}"
+
+x-patroni: &patroni
+  image: "${HA_PATRONI_IMAGE:-nexus-patroni18:4.1.1}"
+  build:
+    context: ./patroni
+  networks: [ha]
+  mem_limit: 576m
+  cpus: "0.8"
+  stop_grace_period: 40s
+  restart: unless-stopped
+  security_opt: [no-new-privileges:true]
+  tmpfs:
+    - /run/nexus-ha:mode=0755
+
+services:
+  etcd-1:
+    <<: *etcd
+    environment:
+      <<: *etcd-env
+      ETCD_NAME: etcd-1
+      ETCD_INITIAL_ADVERTISE_PEER_URLS: "https://${HA_ETCD1_HOST:-etcd-1}:2380"
+      ETCD_ADVERTISE_CLIENT_URLS: "https://${HA_ETCD1_HOST:-etcd-1}:2379"
+    volumes:
+      - etcd_1:/etcd-data
+      - "${HA_SECRETS_DIR:?set HA_SECRETS_DIR}/etcd-1:/run/etcd-tls:ro"
+  etcd-2:
+    <<: *etcd
+    environment:
+      <<: *etcd-env
+      ETCD_NAME: etcd-2
+      ETCD_INITIAL_ADVERTISE_PEER_URLS: "https://${HA_ETCD2_HOST:-etcd-2}:2380"
+      ETCD_ADVERTISE_CLIENT_URLS: "https://${HA_ETCD2_HOST:-etcd-2}:2379"
+    volumes:
+      - etcd_2:/etcd-data
+      - "${HA_SECRETS_DIR:?set HA_SECRETS_DIR}/etcd-2:/run/etcd-tls:ro"
+  etcd-3:
+    <<: *etcd
+    environment:
+      <<: *etcd-env
+      ETCD_NAME: etcd-3
+      ETCD_INITIAL_ADVERTISE_PEER_URLS: "https://${HA_ETCD3_HOST:-etcd-3}:2380"
+      ETCD_ADVERTISE_CLIENT_URLS: "https://${HA_ETCD3_HOST:-etcd-3}:2379"
+    volumes:
+      - etcd_3:/etcd-data
+      - "${HA_SECRETS_DIR:?set HA_SECRETS_DIR}/etcd-3:/run/etcd-tls:ro"
+  data-1:
+    <<: *patroni
+    environment:
+      <<: *patroni-env
+      HA_NODE_NAME: data-1
+      HA_NODE_HOST: "${HA_PG1_HOST:-data-1}"
+    volumes:
+      - pg_1:/var/lib/postgresql
+      - "${HA_SECRETS_DIR:?set HA_SECRETS_DIR}/data-1:/run/nexus-ha-input:ro"
+      - "${HA_SECRETS_DIR:?set HA_SECRETS_DIR}/patroni-common:/run/nexus-ha-common:ro"
+  data-2:
+    <<: *patroni
+    environment:
+      <<: *patroni-env
+      HA_NODE_NAME: data-2
+      HA_NODE_HOST: "${HA_PG2_HOST:-data-2}"
+    volumes:
+      - pg_2:/var/lib/postgresql
+      - "${HA_SECRETS_DIR:?set HA_SECRETS_DIR}/data-2:/run/nexus-ha-input:ro"
+      - "${HA_SECRETS_DIR:?set HA_SECRETS_DIR}/patroni-common:/run/nexus-ha-common:ro"
+  pg-proxy:
+    image: haproxy:3.2.6-alpine
+    environment:
+      HA_PG1_HOST: "${HA_PG1_HOST:-data-1}"
+      HA_PG2_HOST: "${HA_PG2_HOST:-data-2}"
+    ports:
+      - "127.0.0.1:${HA_ENTRY_PG_PORT:-15432}:5432"
+    volumes:
+      - ./haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+      - "${HA_SECRETS_DIR:?set HA_SECRETS_DIR}/haproxy:/run/haproxy-tls:ro"
+    networks: [ha]
+    mem_limit: 64m
+    cpus: "0.1"
+    restart: unless-stopped
+    security_opt: [no-new-privileges:true]
+
+networks:
+  ha: {}
+
+volumes:
+  etcd_1:
+  etcd_2:
+  etcd_3:
+  pg_1:
+  pg_2:

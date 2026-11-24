@@ -185,30 +185,20 @@ func testDatabase(c *gin.Context) {
 	response.Success(c, gin.H{"message": "Connection successful"})
 }
 
-// TestRedisRequest represents Redis test request
-type TestRedisRequest struct {
-	Host      string `json:"host" binding:"required"`
-	Port      int    `json:"port" binding:"required"`
-	Username  string `json:"username"`
-	Password  string `json:"password"`
-	DB        int    `json:"db"`
-	EnableTLS bool   `json:"enable_tls"`
-}
-
 // testRedis tests Redis connection
 func testRedis(c *gin.Context) {
-	var req TestRedisRequest
+	var req RedisConfig
 	if err := c.ShouldBindJSON(&req); err != nil {
 		response.Error(c, http.StatusBadRequest, "Invalid request: "+err.Error())
 		return
 	}
 
 	// Security: Validate inputs
-	if !validateHostname(req.Host) {
+	if !req.Sentinel.Configured() && !validateHostname(req.Host) {
 		response.Error(c, http.StatusBadRequest, "Invalid hostname format")
 		return
 	}
-	if !validatePort(req.Port) {
+	if !req.Sentinel.Configured() && !validatePort(req.Port) {
 		response.Error(c, http.StatusBadRequest, "Invalid port number")
 		return
 	}
@@ -222,16 +212,7 @@ func testRedis(c *gin.Context) {
 		return
 	}
 
-	cfg := &RedisConfig{
-		Host:      req.Host,
-		Port:      req.Port,
-		Username:  req.Username,
-		Password:  req.Password,
-		DB:        req.DB,
-		EnableTLS: req.EnableTLS,
-	}
-
-	if err := TestRedisConnection(cfg); err != nil {
+	if err := TestRedisConnection(&req); err != nil {
 		response.Error(c, http.StatusBadRequest, "Connection failed: "+err.Error())
 		return
 	}
@@ -292,11 +273,11 @@ func install(c *gin.Context) {
 	}
 
 	// Redis validation
-	if !validateHostname(req.Redis.Host) {
+	if !req.Redis.Sentinel.Configured() && !validateHostname(req.Redis.Host) {
 		response.Error(c, http.StatusBadRequest, "Invalid Redis hostname")
 		return
 	}
-	if !validatePort(req.Redis.Port) {
+	if !req.Redis.Sentinel.Configured() && !validatePort(req.Redis.Port) {
 		response.Error(c, http.StatusBadRequest, "Invalid Redis port")
 		return
 	}
@@ -306,6 +287,10 @@ func install(c *gin.Context) {
 	}
 	if len(req.Redis.Username) > 128 {
 		response.Error(c, http.StatusBadRequest, "Invalid Redis username")
+		return
+	}
+	if err := req.Redis.Sentinel.Validate(); err != nil {
+		response.Error(c, http.StatusBadRequest, err.Error())
 		return
 	}
 

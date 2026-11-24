@@ -85,6 +85,7 @@ func TestHTTPUpstreamForwardDrainsUsageAfterClientDisconnect(t *testing.T) {
 	cfg.Security.URLAllowlist.AllowPrivateHosts = true
 	cfg.Security.URLAllowlist.AllowInsecureHTTP = true
 	cfg.Gateway.StreamKeepaliveInterval = 1
+	cfg.Gateway.MaxUpstreamClients = 1
 	upstream := NewHTTPUpstream(cfg)
 	usageRepo := &lifecycleUsageLogRepo{}
 	billingRepo := &lifecycleBillingRepo{}
@@ -139,10 +140,11 @@ func TestHTTPUpstreamForwardDrainsUsageAfterClientDisconnect(t *testing.T) {
 	require.Equal(t, 17, usageRepo.logs[0].InputTokens)
 	require.Equal(t, 8, usageRepo.logs[0].OutputTokens)
 	require.Greater(t, usageRepo.logs[0].ActualCost, 0.0)
-	s, ok := upstream.(*httpUpstreamService)
-	require.True(t, ok)
-	requireNoUpstreamInFlight(t, s)
-	for _, entry := range s.clients {
-		entry.client.CloseIdleConnections()
-	}
+	// With a one-client cache, a new account can only connect if the billed
+	// request released its client when the detached stream finished.
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, srv.URL, nil)
+	require.NoError(t, err)
+	resp, err := upstream.Do(req, "", 2, 1)
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
 }

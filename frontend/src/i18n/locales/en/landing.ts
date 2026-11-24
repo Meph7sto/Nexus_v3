@@ -191,6 +191,13 @@ export default {
   setup: {
     title: 'Nexus Setup',
     description: 'Configure your Nexus instance',
+    topology: {
+      label: 'Data topology',
+      single: 'Single node',
+      ha: 'High availability / Redis Sentinel',
+      managed: 'Managed database',
+      haHint: 'Use the stable PostgreSQL writer endpoint, not the address of the current primary.'
+    },
     database: {
       title: 'Database Configuration',
       description: 'Connect to your PostgreSQL database',
@@ -219,7 +226,15 @@ export default {
       usernamePlaceholder: 'Leave empty for default user',
       passwordPlaceholder: 'Password',
       enableTls: 'Enable TLS',
-      enableTlsHint: 'Use TLS when connecting to Redis (public CA certs)'
+      enableTlsHint: 'Use TLS when connecting to Redis (public CA certs)',
+      sentinel: {
+        master: 'Sentinel master name',
+        addresses: 'Sentinel addresses',
+        primaries: 'Allowed Redis primaries',
+        username: 'Sentinel username (optional)',
+        password: 'Sentinel password',
+        tls: 'Use TLS for Sentinel'
+      }
     },
     admin: {
       title: 'Admin Account',

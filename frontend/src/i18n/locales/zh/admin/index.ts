@@ -9,6 +9,7 @@ import audit from './audit'
 import promptAudit from './promptAudit'
 import monthlyLedger from './monthlyLedger'
 import plugins from './plugins'
+import cluster from './cluster'
 
 export default {
   ...overview,
@@ -22,4 +23,5 @@ export default {
   ...promptAudit,
   ...monthlyLedger,
   ...plugins,
+  ...cluster,
 }

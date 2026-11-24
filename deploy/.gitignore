@@ -3,7 +3,17 @@
 # =============================================================================
 
 # Data directories (generated at runtime when using docker-compose.local.yml)
-data/
+data/*
+!data/single/
+data/single/*
+!data/single/compose.yaml
+!data/single/README.md
+!data/ha/
+data/ha/redis-secrets/
+data/ha/*.secret
+!data/ha/
+data/ha/.secrets/
+data/ha/.rehearsal/
 postgres_data/
 redis_data/
 

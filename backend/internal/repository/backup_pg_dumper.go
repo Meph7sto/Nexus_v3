@@ -112,7 +112,10 @@ func (d *PgDumper) Restore(ctx context.Context, data io.Reader) error {
 		"-p", fmt.Sprintf("%d", d.cfg.Port),
 		"-U", d.cfg.User,
 		"-d", d.cfg.DBName,
+		"--no-psqlrc",
 		"--single-transaction",
+		"--set=ON_ERROR_STOP=1",
+		"--file=-",
 	}
 
 	cmd := exec.CommandContext(ctx, "psql", args...)

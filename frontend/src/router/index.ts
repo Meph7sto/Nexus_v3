@@ -597,6 +597,17 @@ export const routes: RouteRecordRaw[] = [
     }
   },
   {
+    path: '/admin/cluster',
+    name: 'AdminCluster',
+    component: () => import('@/views/admin/ClusterView.vue'),
+    meta: {
+      requiresAuth: true,
+      requiresAdmin: true,
+      title: 'Cluster',
+      titleKey: 'admin.cluster.title'
+    }
+  },
+  {
     path: '/admin/proxies',
     name: 'AdminProxies',
     component: () => import('@/views/admin/ProxiesView.vue'),

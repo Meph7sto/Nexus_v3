@@ -1,0 +1,90 @@
+package upstream
+
+import (
+	"context"
+	"io"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"sync/atomic"
+	"testing"
+
+	"github.com/stretchr/testify/require"
+)
+
+func TestControlledDialPinsActualSOCKS5Destination(t *testing.T) {
+	var seenHost atomic.Value
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		seenHost.Store(req.Host)
+		_, _ = io.WriteString(w, "ok")
+	}))
+	t.Cleanup(server.Close)
+	proxy, connections := startTestSOCKS5Proxy(t)
+	serverAddr := server.Listener.Addr().String()
+	_, port, err := net.SplitHostPort(serverAddr)
+	require.NoError(t, err)
+	original := "never-resolve.invalid:" + port
+	client := NewClient(&Config{DialAddresses: func(_ context.Context, _ string, addr string) ([]string, error) {
+		if addr != original {
+			t.Errorf("dial policy got %q, want %q", addr, original)
+		}
+		return []string{net.JoinHostPort("127.0.0.2", port), serverAddr}, nil
+	}})
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "http://"+original+"/demo", nil)
+	require.NoError(t, err)
+	resp, err := client.Do(req, proxy, 1, 1, RequestOptions{})
+	require.NoError(t, err)
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+	require.Equal(t, "ok", string(body))
+	require.Equal(t, original, seenHost.Load())
+	require.Equal(t, int64(2), connections.Load())
+}
+
+func TestControlledDialLimitsConnectionsAcrossTransports(t *testing.T) {
+	client := NewClient(&Config{MaxConnections: 1})
+	dial := func(context.Context, string, string) (net.Conn, error) {
+		conn, other := net.Pipe()
+		t.Cleanup(func() { _ = other.Close() })
+		return conn, nil
+	}
+	firstTransport := &http.Transport{DialContext: dial}
+	secondTransport := &http.Transport{DialContext: dial}
+	require.NoError(t, client.configureDialPolicy(firstTransport, false))
+	require.NoError(t, client.configureDialPolicy(secondTransport, false))
+	conn, err := firstTransport.DialContext(t.Context(), "tcp", "127.0.0.1:443")
+	require.NoError(t, err)
+	_, err = secondTransport.DialContext(t.Context(), "tcp", "127.0.0.1:443")
+	require.ErrorContains(t, err, "connection limit")
+	require.NoError(t, conn.Close())
+	require.NoError(t, conn.Close())
+	conn, err = secondTransport.DialContext(t.Context(), "tcp", "127.0.0.1:443")
+	require.NoError(t, err)
+	require.NoError(t, conn.Close())
+}
+
+func TestControlledDialTrustedDNSRequiresSOCKSAndSendsExactName(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(204) }))
+	t.Cleanup(server.Close)
+	const name = "proxy-dns-only.invalid"
+	var wireName atomic.Value
+	proxy, _ := startTestSOCKS5ProxyWithResolver(t, func(host string) string {
+		wireName.Store(host)
+		return "127.0.0.1"
+	})
+	_, port, err := net.SplitHostPort(server.Listener.Addr().String())
+	require.NoError(t, err)
+	client := NewClient(&Config{ProxyDNS: true, DialAddresses: func(_ context.Context, _, addr string) ([]string, error) {
+		return []string{addr}, nil
+	}})
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "http://"+net.JoinHostPort(name, port), nil)
+	require.NoError(t, err)
+	_, err = client.Do(req, "", 1, 1, RequestOptions{})
+	require.ErrorContains(t, err, "requires SOCKS")
+	resp, err := client.Do(req, proxy, 1, 1, RequestOptions{})
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+	require.Equal(t, 204, resp.StatusCode)
+	require.Equal(t, name, wireName.Load())
+}

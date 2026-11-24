@@ -32,6 +32,17 @@ func DetachUpstreamContext(ctx context.Context, timeout ...time.Duration) contex
 	return context.WithValue(context.WithoutCancel(ctx), upstreamDrainKey{}, policy)
 }
 
+// UpstreamClientActive reports whether a new upstream attempt may start. A
+// detached attempt may finish reading for billing after the original client
+// leaves, but the drain window does not authorize another send.
+func UpstreamClientActive(ctx context.Context) bool {
+	if ctx.Err() != nil {
+		return false
+	}
+	policy, detached := ctx.Value(upstreamDrainKey{}).(upstreamDrainPolicy)
+	return !detached || policy.client.Err() == nil
+}
+
 // NewUpstreamAttemptContext starts a total drain budget when the original client
 // context is cancelled. Incoming bytes do not extend this budget. Until then the
 // request may stream for arbitrarily long, and late usage remains readable

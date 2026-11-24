@@ -34,6 +34,14 @@ export interface RedisConfig {
   password: string
   db: number
   enable_tls: boolean
+  sentinel?: {
+    addresses: string[]
+    allowed_primaries: string[]
+    master_name: string
+    username: string
+    password: string
+    enable_tls: boolean
+  }
 }
 
 export interface AdminConfig {

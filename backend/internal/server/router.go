@@ -73,7 +73,7 @@ func SetupRouter(
 	r.Use(middleware2.ServerTiming(cfg.Server.EnableServerTiming))
 
 	// Serve embedded frontend with settings injection if available
-	if web.HasEmbeddedFrontend() {
+	if cfg.EntryNode.AllowsControl() && web.HasEmbeddedFrontend() {
 		frontendServer, err := web.NewFrontendServer(settingService) //nolint:staticcheck // SA4023: the !embed stub always errors; embed builds can return nil
 		if err != nil {                                              //nolint:staticcheck // SA4023: see above
 			log.Printf("Warning: Failed to create frontend server with settings injection: %v, using legacy mode", err)
@@ -93,8 +93,10 @@ func SetupRouter(
 
 	// 注册路由
 	registerRoutes(r, handlers, jwtAuth, optionalJWTAuth, adminAuth, adminPermission, apiKeyAuth, auditLog, stepUpAuth, apiKeyService, subscriptionService, opsService, settingService, adminPermissionRepo, compositeResolver, cfg, redisClient)
-	if err := routes.ValidateAdminRouteManifest(r.Routes()); err != nil {
-		panic("invalid admin RBAC route manifest: " + err.Error())
+	if cfg.EntryNode.AllowsControl() {
+		if err := routes.ValidateAdminRouteManifest(r.Routes()); err != nil {
+			panic("invalid admin RBAC route manifest: " + err.Error())
+		}
 	}
 
 	return r
@@ -123,6 +125,13 @@ func registerRoutes(
 	// 通用路由（健康检查、状态等）
 	routes.RegisterCommonRoutes(r)
 
+	if cfg.EntryNode.AllowsGateway() {
+		routes.RegisterGatewayRoutes(r, h, apiKeyAuth, apiKeyService, subscriptionService, opsService, settingService, compositeResolver, cfg)
+	}
+	if !cfg.EntryNode.AllowsControl() {
+		return
+	}
+
 	// API v1
 	v1 := r.Group("/api/v1")
 
@@ -137,7 +146,6 @@ func registerRoutes(
 	routes.RegisterAdminRoutes(v1, h, adminAuth, adminPermission, auditLog, stepUpAuth, settingService, panelRateLimiter)
 	routes.RegisterMCPRoutes(v1, h, adminPermission, auditLog, stepUpAuth, settingService, panelRateLimiter, cfg.CORS.AllowedOrigins, redisClient)
 	routes.RegisterMCPOAuthRoutes(r, v1, h, redisClient)
-	routes.RegisterGatewayRoutes(r, h, apiKeyAuth, apiKeyService, subscriptionService, opsService, settingService, compositeResolver, cfg)
 	routes.RegisterPaymentRoutes(v1, h.Payment, h.PaymentWebhook, h.Admin.Payment, jwtAuth, adminAuth, adminPermission, auditLog, settingService, panelRateLimiter, redisClient)
 
 	handler.RegisterPageRoutes(v1, cfg.Pricing.DataDir, gin.HandlerFunc(jwtAuth), gin.HandlerFunc(adminAuth), adminPermission, settingService, adminPermissionRepo)

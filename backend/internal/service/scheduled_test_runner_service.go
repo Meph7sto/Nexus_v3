@@ -55,7 +55,11 @@ func (s *ScheduledTestRunnerService) Start() {
 			}
 		}
 
-		c := cron.New(cron.WithParser(scheduledTestCronParser), cron.WithLocation(loc))
+		options := []cron.Option{cron.WithParser(scheduledTestCronParser), cron.WithLocation(loc)}
+		if s.cfg != nil && s.cfg.EntryNode.ClusterEnabled {
+			options = append(options, cron.WithChain(cron.SkipIfStillRunning(cron.DefaultLogger)))
+		}
+		c := cron.New(options...)
 		_, err := c.AddFunc("* * * * *", func() { s.runScheduled() })
 		if err != nil {
 			logger.LegacyPrintf("service.scheduled_test_runner", "[ScheduledTestRunner] not started (invalid schedule): %v", err)
@@ -120,6 +124,10 @@ func (s *ScheduledTestRunnerService) runScheduled() {
 }
 
 func (s *ScheduledTestRunnerService) runOnePlan(ctx context.Context, plan *ScheduledTestPlan) {
+	clustered := s.cfg != nil && s.cfg.EntryNode.ClusterEnabled
+	if clustered && !s.claimDue(ctx, plan, time.Now()) {
+		return
+	}
 	result, err := s.accountTestSvc.RunTestBackground(ctx, plan.AccountID, plan.ModelID)
 	if err != nil {
 		logger.LegacyPrintf("service.scheduled_test_runner", "[ScheduledTestRunner] plan=%d RunTestBackground error: %v", plan.ID, err)
@@ -135,6 +143,9 @@ func (s *ScheduledTestRunnerService) runOnePlan(ctx context.Context, plan *Sched
 		s.tryRecoverAccount(ctx, plan.AccountID, plan.ID)
 	}
 
+	if clustered {
+		return
+	}
 	nextRun, err := computeNextRun(plan.CronExpression, time.Now())
 	if err != nil {
 		logger.LegacyPrintf("service.scheduled_test_runner", "[ScheduledTestRunner] plan=%d computeNextRun error: %v", plan.ID, err)
@@ -144,6 +155,24 @@ func (s *ScheduledTestRunnerService) runOnePlan(ctx context.Context, plan *Sched
 	if err := s.planRepo.UpdateAfterRun(ctx, plan.ID, time.Now(), nextRun); err != nil {
 		logger.LegacyPrintf("service.scheduled_test_runner", "[ScheduledTestRunner] plan=%d UpdateAfterRun error: %v", plan.ID, err)
 	}
+}
+
+func (s *ScheduledTestRunnerService) claimDue(ctx context.Context, plan *ScheduledTestPlan, now time.Time) bool {
+	claimer, ok := s.planRepo.(ScheduledTestPlanClaimRepository)
+	if !ok || plan.NextRunAt == nil || plan.NextRunAt.After(now) {
+		return false
+	}
+	next, err := computeNextRun(plan.CronExpression, now)
+	if err != nil {
+		logger.LegacyPrintf("service.scheduled_test_runner", "[ScheduledTestRunner] plan=%d computeNextRun error: %v", plan.ID, err)
+		return false
+	}
+	claimed, err := claimer.ClaimDue(ctx, plan.ID, *plan.NextRunAt, now, next)
+	if err != nil {
+		logger.LegacyPrintf("service.scheduled_test_runner", "[ScheduledTestRunner] plan=%d claim due error: %v", plan.ID, err)
+		return false
+	}
+	return claimed
 }
 
 // tryRecoverAccount attempts to recover an account from recoverable runtime state.

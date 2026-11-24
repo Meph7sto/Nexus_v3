@@ -84,6 +84,19 @@ func (r *scheduledTestPlanRepository) UpdateAfterRun(ctx context.Context, id int
 	return err
 }
 
+func (r *scheduledTestPlanRepository) ClaimDue(ctx context.Context, id int64, dueAt, attemptedAt, nextRunAt time.Time) (bool, error) {
+	res, err := r.db.ExecContext(ctx, `
+		UPDATE scheduled_test_plans
+		SET last_run_at = $3, next_run_at = $4, updated_at = $3
+		WHERE id = $1 AND enabled = true AND next_run_at = $2
+	`, id, dueAt, attemptedAt, nextRunAt)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n == 1, err
+}
+
 // --- Result Repository ---
 
 type scheduledTestResultRepository struct {

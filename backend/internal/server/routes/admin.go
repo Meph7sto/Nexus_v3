@@ -83,6 +83,7 @@ func RegisterAdminRoutes(
 
 		// 数据库备份恢复
 		registerBackupRoutes(admin, h, stepUpAuth)
+		registerClusterRoutes(admin, h, stepUpAuth)
 
 		// 运维监控（Ops）
 		registerOpsRoutes(admin, h)

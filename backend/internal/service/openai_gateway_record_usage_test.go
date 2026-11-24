@@ -246,6 +246,8 @@ func newOpenAIRecordUsageServiceForTest(usageRepo UsageLogRepository, userRepo U
 		nil,
 		nil, // userPlatformQuotaRepo
 	)
+	// These billing fixtures replace dependencies after construction.
+	svc.StopOpenAICodexTicketHarvester()
 	svc.userGroupRateResolver = newUserGroupRateResolver(
 		rateRepo,
 		nil,

@@ -1,10 +1,12 @@
 package service
 
-func ProvideMonthlyLedgerService(repo MonthlyLedgerRepository, email *NotificationEmailService, settings SettingRepository) *MonthlyLedgerService {
+func ProvideMonthlyLedgerService(repo MonthlyLedgerRepository, email *NotificationEmailService, settings SettingRepository, tasks *SharedTaskGate) *MonthlyLedgerService {
 	s := NewMonthlyLedgerService(repo)
 	s.emailSettings = settings
 	s.emailSend = email.Send
-	s.StartEmailNotifications(email)
-	s.StartIncomeSchedules()
+	tasks.Start(func() {
+		s.StartEmailNotifications(email)
+		s.StartIncomeSchedules()
+	})
 	return s
 }

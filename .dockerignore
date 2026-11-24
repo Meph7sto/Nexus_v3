@@ -25,6 +25,12 @@ Thumbs.db
 # Build artifacts
 dist/
 build/
+/bin/
+/backend/bin/
+/backend/.gocache/
+/backend/internal/web/dist/
+/.cache/
+/backend/.cache/
 
 # Node modules (will be installed in container)
 frontend/node_modules/

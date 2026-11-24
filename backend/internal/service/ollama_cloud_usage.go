@@ -437,16 +437,21 @@ func ProvideOllamaCloudUsageService(
 	cfg *config.Config,
 	lockCache LeaderLockCache,
 	db *sql.DB,
+	tasks *SharedTaskGate,
 ) *OllamaCloudUsageService {
 	keyConfigured := cfg != nil && cfg.Totp.EncryptionKeyConfigured
 	svc := NewOllamaCloudUsageService(accountRepo, httpUpstream, settingService, encryptor, keyConfigured)
 	svc.lockCache = lockCache
 	svc.db = db
-	svc.Start()
+	svc.start(tasks.Running())
 	return svc
 }
 
 func (s *OllamaCloudUsageService) Start() {
+	s.start(true)
+}
+
+func (s *OllamaCloudUsageService) start(runPeriodic bool) {
 	if s == nil {
 		return
 	}
@@ -456,9 +461,14 @@ func (s *OllamaCloudUsageService) Start() {
 		return
 	}
 	s.started = true
-	s.wg.Add(2)
+	s.wg.Add(1)
+	if runPeriodic {
+		s.wg.Add(1)
+	}
 	s.mu.Unlock()
-	go s.runLoop()
+	if runPeriodic {
+		go s.runLoop()
+	}
 	go s.probeLoop()
 }
 

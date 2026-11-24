@@ -191,6 +191,13 @@ export default {
   setup: {
     title: 'Nexus 安装向导',
     description: '配置您的 Nexus 实例',
+    topology: {
+      label: '数据层部署方式',
+      single: '单节点',
+      ha: '高可用 / Redis Sentinel',
+      managed: '托管数据库',
+      haHint: '填写 PostgreSQL 的固定写入端点，不要填写当前主库的节点地址。'
+    },
     database: {
       title: '数据库配置',
       description: '连接到您的 PostgreSQL 数据库',
@@ -219,7 +226,15 @@ export default {
       usernamePlaceholder: '默认用户留空',
       passwordPlaceholder: '密码',
       enableTls: '启用 TLS',
-      enableTlsHint: '连接 Redis 时使用 TLS（公共 CA 证书）'
+      enableTlsHint: '连接 Redis 时使用 TLS（公共 CA 证书）',
+      sentinel: {
+        master: 'Sentinel 主库名称',
+        addresses: 'Sentinel 节点地址',
+        primaries: '允许成为主库的 Redis 地址',
+        username: 'Sentinel 用户名（可选）',
+        password: 'Sentinel 密码',
+        tls: '使用 TLS 连接 Sentinel'
+      }
     },
     admin: {
       title: '管理员账户',

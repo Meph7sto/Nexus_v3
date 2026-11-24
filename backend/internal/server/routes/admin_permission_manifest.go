@@ -48,6 +48,21 @@ func buildAdminRoutePermissionManifest() map[string]AdminRoutePermission {
 	}
 
 	const admin = "/api/v1/admin"
+	const cluster = admin + "/cluster"
+
+	add(service.AdminResourceCluster, service.AdminActionView, http.MethodGet, cluster, cluster+"/workers/:id/drain", cluster+"/data")
+	add(service.AdminResourceCluster, service.AdminActionCreate, http.MethodPost, cluster+"/workers")
+	add(service.AdminResourceCluster, service.AdminActionUpdate, http.MethodPut, cluster+"/workers/:id", cluster+"/policy")
+	add(service.AdminResourceCluster, service.AdminActionDelete, http.MethodDelete, cluster+"/workers/:id")
+	add(service.AdminResourceCluster, service.AdminActionExecute, http.MethodPost, cluster+"/workers/:id/probe", cluster+"/workers/:id/drain", cluster+"/data/preflight")
+	add(service.AdminResourceCluster, service.AdminActionExport, http.MethodPost, cluster+"/workers/:id/join", cluster+"/data/export")
+	add(service.AdminResourceCluster, service.AdminActionDelete, http.MethodPost, cluster+"/entries/:id/retire-offline", cluster+"/workers/:id/forget-offline")
+	humanOnly(http.MethodPost, cluster+"/entries/:id/retire-offline", cluster+"/workers/:id/forget-offline")
+	humanOnly(http.MethodGet, cluster, cluster+"/workers/:id/drain", cluster+"/data")
+	humanOnly(http.MethodPut, cluster+"/workers/:id", cluster+"/policy")
+	humanOnly(http.MethodDelete, cluster+"/workers/:id")
+	humanOnly(http.MethodPost, cluster+"/workers", cluster+"/workers/:id/probe", cluster+"/workers/:id/drain",
+		cluster+"/workers/:id/join", cluster+"/data/preflight", cluster+"/data/export")
 
 	add(service.AdminResourceDashboard, service.AdminActionView, http.MethodGet,
 		admin+"/dashboard/snapshot-v2", admin+"/dashboard/stats", admin+"/dashboard/realtime",

@@ -1,4 +1,6 @@
-.PHONY: build build-backend build-frontend test test-backend test-frontend test-frontend-critical
+.PHONY: build build-backend build-frontend build-entry build-worker build-all check-worker-deps test test-backend test-frontend test-frontend-critical
+
+BIN_DIR ?= bin
 
 FRONTEND_CRITICAL_VITEST := \
 	src/i18n/__tests__/localeKeyCompleteness.spec.ts \
@@ -43,6 +45,17 @@ build-backend:
 # 编译前端（需要已安装依赖）
 build-frontend:
 	@pnpm --dir frontend run build
+
+build-entry: build-frontend
+	@$(MAKE) -C backend build-entry BIN_DIR="$(abspath $(BIN_DIR))"
+
+build-worker:
+	@$(MAKE) -C backend build-worker BIN_DIR="$(abspath $(BIN_DIR))"
+
+build-all: build-entry build-worker
+
+check-worker-deps:
+	@$(MAKE) -C backend check-worker-deps
 
 # 运行测试（后端 + 前端）
 test: test-backend test-frontend

@@ -51,6 +51,12 @@ func NewPromptService(
 }
 
 func (s *PromptService) Start(ctx context.Context) error {
+	return s.StartWithWorker(ctx, true)
+}
+
+// StartWithWorker refreshes local policy on every Entry. The designated
+// Entry can additionally consume the shared deferred-audit queue.
+func (s *PromptService) StartWithWorker(ctx context.Context, runWorker bool) error {
 	if s == nil || s.config == nil || s.runner == nil {
 		return errors.New("prompt audit service unavailable")
 	}
@@ -63,8 +69,10 @@ func (s *PromptService) Start(ctx context.Context) error {
 	s.background, s.cancel = background, cancel
 	s.lifecycleMu.Unlock()
 	configErr := s.config.Start(background)
-	workerErr := s.runner.Start(background)
-	return errors.Join(configErr, workerErr)
+	if runWorker {
+		return errors.Join(configErr, s.runner.Start(background))
+	}
+	return configErr
 }
 
 func (s *PromptService) Shutdown(ctx context.Context) error {

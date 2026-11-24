@@ -1,0 +1,78 @@
+# Merge with compose.yaml for a same-host lab. Multi-host: redis.node.compose.yaml.
+x-redis-common: &redis-common
+  image: redis:8-alpine
+  networks: [ha]
+  restart: unless-stopped
+  mem_limit: 320m
+  cpus: "0.5"
+  configs:
+    - source: redis_launch
+      target: /etc/nexus/redis-launch.sh
+    - source: redis_conf
+      target: /etc/nexus/redis.conf
+    - source: redis_sentinel_conf
+      target: /etc/nexus/redis-sentinel.conf
+
+x-sentinel-common: &sentinel-common
+  <<: *redis-common
+  command: ["/bin/sh", "/etc/nexus/redis-launch.sh", "sentinel"]
+  mem_limit: 96m
+  cpus: "0.2"
+  secrets: [redis_data_password, redis_sentinel_password]
+
+services:
+  redis-a:
+    <<: *redis-common
+    command: ["/bin/sh", "/etc/nexus/redis-launch.sh", "primary"]
+    environment:
+      HA_REDIS_INITIAL_MASTER_HOST: redis-a
+      HA_REDIS_ANNOUNCE_HOST: redis-a
+    secrets: [redis_data_password]
+    volumes: [redis_a_data:/data]
+  redis-b:
+    <<: *redis-common
+    command: ["/bin/sh", "/etc/nexus/redis-launch.sh", "replica"]
+    environment:
+      HA_REDIS_INITIAL_MASTER_HOST: redis-a
+      HA_REDIS_ANNOUNCE_HOST: redis-b
+    secrets: [redis_data_password]
+    volumes: [redis_b_data:/data]
+  redis-sentinel-a:
+    <<: *sentinel-common
+    environment:
+      HA_REDIS_INITIAL_MASTER_HOST: redis-a
+      HA_REDIS_ANNOUNCE_HOST: redis-sentinel-a
+    volumes: [redis_sentinel_a_state:/data]
+  redis-sentinel-b:
+    <<: *sentinel-common
+    environment:
+      HA_REDIS_INITIAL_MASTER_HOST: redis-a
+      HA_REDIS_ANNOUNCE_HOST: redis-sentinel-b
+    volumes: [redis_sentinel_b_state:/data]
+  redis-sentinel-c:
+    <<: *sentinel-common
+    environment:
+      HA_REDIS_INITIAL_MASTER_HOST: redis-a
+      HA_REDIS_ANNOUNCE_HOST: redis-sentinel-c
+    volumes: [redis_sentinel_c_state:/data]
+
+configs:
+  redis_launch:
+    file: ./redis-launch.sh
+  redis_conf:
+    file: ./redis.conf
+  redis_sentinel_conf:
+    file: ./redis-sentinel.conf
+
+secrets:
+  redis_data_password:
+    file: "${HA_REDIS_PASSWORD_FILE:?set HA_REDIS_PASSWORD_FILE}"
+  redis_sentinel_password:
+    file: "${HA_REDIS_SENTINEL_PASSWORD_FILE:?set HA_REDIS_SENTINEL_PASSWORD_FILE}"
+
+volumes:
+  redis_a_data:
+  redis_b_data:
+  redis_sentinel_a_state:
+  redis_sentinel_b_state:
+  redis_sentinel_c_state:

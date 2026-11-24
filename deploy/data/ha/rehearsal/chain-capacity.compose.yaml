@@ -1,0 +1,10 @@
+services:
+  entry:
+    cpus: 1.0
+    mem_limit: 1g
+  worker-a:
+    cpus: 1.0
+    mem_limit: 1g
+  worker-b:
+    cpus: 1.0
+    mem_limit: 1g

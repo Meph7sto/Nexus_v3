@@ -1,0 +1,33 @@
+services:
+  old-pg:
+    image: postgres:18-alpine
+    environment: &pg-env
+      POSTGRES_DB: ${NEXUS_REHEARSAL_DB:?}
+      POSTGRES_USER: nexus_rehearsal_admin
+      POSTGRES_PASSWORD: ${NEXUS_REHEARSAL_SECRET:?}
+    ports: ["127.0.0.1::5432"]
+    tmpfs: ["/var/lib/postgresql"]
+  new-pg:
+    image: postgres:18-alpine
+    environment: *pg-env
+    ports: ["127.0.0.1::5432"]
+    tmpfs: ["/var/lib/postgresql"]
+  old-redis:
+    image: redis:8-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    ports: ["127.0.0.1::6379"]
+    tmpfs: ["/data"]
+  new-redis:
+    image: redis:8-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    ports: ["127.0.0.1::6379"]
+    tmpfs: ["/data"]
+  s3:
+    image: adobe/s3mock@sha256:ab01a6946750f451ca215a47e91030695b260e4003b8a5a6201d25029b8fca92
+    ports: ["127.0.0.1::9090"]
+networks:
+  default:
+    driver: bridge
+    driver_opts:
+      com.docker.network.bridge.host_binding_ipv4: "127.0.0.1"
+      com.docker.network.bridge.enable_ip_masquerade: "false"

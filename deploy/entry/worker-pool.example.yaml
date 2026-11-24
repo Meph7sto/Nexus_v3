@@ -1,0 +1,22 @@
+# Merge this section into the initialized Entry data directory's config.yaml.
+# Use the private Worker DNS names on the mTLS server certificates.
+worker_pool:
+  enabled: false
+  # Set WORKER_POOL_DEFAULT_PROXY_URL in the private Entry environment file.
+  fallback_local: false
+  allow_private_h2c: false
+  tls_ca_file: /run/nexus-worker-secrets/worker-ca.pem
+  tls_cert_file: /run/nexus-worker-secrets/entry-cert.pem
+  tls_key_file: /run/nexus-worker-secrets/entry-key.pem
+  health_interval: 5s
+  health_timeout: 2s
+  max_attempts: 2
+  nodes:
+    - id: worker-a
+      url: https://worker-a.internal:9090
+      shared_token_file: /run/nexus-worker-secrets/worker-a-token
+      weight: 1
+    - id: worker-b
+      url: https://worker-b.internal:9090
+      shared_token_file: /run/nexus-worker-secrets/worker-b-token
+      weight: 1

@@ -900,6 +900,27 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 			})
 		}
 		if err != nil {
+			var relayErr *service.HTTPUpstreamRelayError
+			if errors.As(err, &relayErr) && relayErr.IsTerminal() {
+				submitResponsesUsage(result)
+				if (result != nil && result.ClientDisconnect) || failoverClientGone(c) {
+					return
+				}
+				reqLog.Warn("openai.worker_attempt_terminated", zap.Bool("unsent", relayErr.Unsent), zap.Uint8("origin", uint8(relayErr.Origin)))
+				if c.Writer.Written() && !reqStream {
+					return
+				}
+				streamStarted = streamStarted || c.Writer.Written()
+				if relayErr.Unsent {
+					h.handleStreamingAwareError(c, http.StatusServiceUnavailable, "worker_unavailable", "Worker route is unavailable", streamStarted)
+				} else {
+					if !streamStarted {
+						c.Header("x-should-retry", "false")
+					}
+					h.handleStreamingAwareError(c, http.StatusBadGateway, "upstream_outcome_unknown", "Upstream request may already have been processed", streamStarted)
+				}
+				return
+			}
 			if result != nil && result.ClientDisconnect {
 				reqLog.Info("openai.client_disconnected",
 					zap.Int64("account_id", account.ID),

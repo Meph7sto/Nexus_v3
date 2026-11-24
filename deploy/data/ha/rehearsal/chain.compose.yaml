@@ -1,0 +1,78 @@
+services:
+  postgres:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_DB: nexus_chain_fixture
+      POSTGRES_USER: nexus_chain_fixture
+      POSTGRES_PASSWORD: synthetic-fixture-db-only
+    tmpfs: ["/var/lib/postgresql"]
+  redis:
+    image: redis:8-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    tmpfs: ["/data"]
+  fixture:
+    image: alpine:3.23
+    entrypoint: ["/rehearsal/chainfixture"]
+    volumes:
+      - "${NEXUS_CHAIN_DIR:?}:/rehearsal:ro"
+  worker-a:
+    image: alpine:3.23
+    entrypoint: ["/rehearsal/worker"]
+    volumes:
+      - "${NEXUS_CHAIN_DIR:?}:/rehearsal:ro"
+    extra_hosts: ["api.openai.com:1.1.1.1"]
+    environment: &worker-env
+      SSL_CERT_FILE: /rehearsal/fixture-ca.pem
+      WORKER_LISTEN_ADDR: 0.0.0.0:9090
+      WORKER_NODE_ID: worker-a
+      WORKER_ALLOW_PRIVATE_H2C: "true"
+      WORKER_SHARED_TOKEN: test-rehearsal-only-never-use-in-production
+      WORKER_ALLOWED_TARGETS: api.openai.com
+      WORKER_PROXY_URL: socks5h://fixture:1080
+      WORKER_MAX_INFLIGHT: "8"
+  worker-b:
+    image: alpine:3.23
+    entrypoint: ["/rehearsal/worker"]
+    volumes:
+      - "${NEXUS_CHAIN_DIR:?}:/rehearsal:ro"
+    extra_hosts: ["api.openai.com:1.1.1.1"]
+    environment:
+      <<: *worker-env
+      WORKER_NODE_ID: worker-b
+  entry: &entry
+    image: alpine:3.23
+    entrypoint: ["/rehearsal/entry-${NEXUS_CHAIN_BINARY:-v3}"]
+    volumes:
+      - "${NEXUS_CHAIN_DIR:?}:/rehearsal:ro"
+      - "./chain-entry.yaml:/etc/nexus/fixture.yaml:ro"
+    working_dir: /tmp
+    extra_hosts: ["api.openai.com:1.1.1.1"]
+    environment: &entry-env
+      SSL_CERT_FILE: /rehearsal/fixture-ca.pem
+      CONFIG_FILE: /etc/nexus/fixture.yaml
+      SKIP_SETUP: "true"
+      AUTO_SETUP: "false"
+      WORKER_POOL_ENABLED: "${NEXUS_CHAIN_RELAY:-false}"
+      ENTRY_NODE_CLUSTER_ENABLED: "${NEXUS_CHAIN_CLUSTER:-false}"
+      ENTRY_NODE_ID: fixture-entry-a
+      ENTRY_NODE_ROLE: "${NEXUS_CHAIN_ROLE:-all}"
+      ENTRY_NODE_SHARED_TASK_OWNER_ID: fixture-task-owner
+    tmpfs: ["/tmp"]
+  entry-peer:
+    <<: *entry
+    profiles: ["entry-failover"]
+    environment:
+      <<: *entry-env
+      ENTRY_NODE_ID: fixture-entry-b
+  driver:
+    profiles: ["driver"]
+    image: alpine:3.23
+    entrypoint: ["/rehearsal/chain-driver", "-test.run=^TestLocalRehearsalChain$", "-test.v", "-test.timeout=2m"]
+    volumes:
+      - "${NEXUS_CHAIN_DIR:?}:/rehearsal:ro"
+    environment:
+      NEXUS_CHAIN_MODE: "${NEXUS_CHAIN_MODE:-setup}"
+      NEXUS_CHAIN_CONCURRENCY: "${NEXUS_CHAIN_CONCURRENCY:-0}"
+networks:
+  default:
+    internal: true

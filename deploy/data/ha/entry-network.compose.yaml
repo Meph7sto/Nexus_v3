@@ -1,0 +1,18 @@
+# Apply after deploy/entry/compose.yaml on each Entry host.
+services:
+  entry:
+    environment:
+      DATABASE_HOST: pg-proxy
+      DATABASE_PORT: "5432"
+      DATABASE_SSLMODE: verify-full
+      PGSSLROOTCERT: /run/nexus-pg-ca/ca.crt
+    volumes:
+      - "${HA_ENTRY_PG_CA_FILE:?set the PG CA certificate absolute path}:/run/nexus-pg-ca/ca.crt:ro"
+    networks:
+      default: {}
+      entry_data: {}
+
+networks:
+  entry_data:
+    external: true
+    name: "${HA_DOCKER_NETWORK:?set the local HA Compose network name}"

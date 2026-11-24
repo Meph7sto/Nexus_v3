@@ -115,6 +115,14 @@ func isClientCanceledTransportError(ctx context.Context, err error) bool {
 //
 // passthrough tags the Ops error event for the OpenAI passthrough forward path.
 func (s *OpenAIGatewayService) handleOpenAIUpstreamTransportError(ctx context.Context, c *gin.Context, account *Account, err error, passthrough bool) error {
+	var relayErr *HTTPUpstreamRelayError
+	if errors.As(err, &relayErr) && relayErr.IsTerminal() {
+		if relayErr.Origin == HTTPUpstreamRelayUpstream &&
+			(relayErr.Persistent || relayErr.LocalFallback && classifyUpstreamTransportError(relayErr.Err).Persistent) {
+			s.tempUnscheduleOpenAITransportError(ctx, account, "relayed upstream proxy or network failure")
+		}
+		return err
+	}
 	if isClientCanceledTransportError(ctx, err) {
 		return err
 	}

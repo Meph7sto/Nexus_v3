@@ -1,0 +1,22 @@
+# Only enable on the designated hosts with the named WireGuard addresses.
+services:
+  etcd-1:
+    ports:
+      - "${HA_DATA1_BIND_IP:?set data-1 WireGuard IP}:2379:2379"
+      - "${HA_DATA1_BIND_IP:?set data-1 WireGuard IP}:2380:2380"
+  etcd-2:
+    ports:
+      - "${HA_DATA2_BIND_IP:?set data-2 WireGuard IP}:2379:2379"
+      - "${HA_DATA2_BIND_IP:?set data-2 WireGuard IP}:2380:2380"
+  etcd-3:
+    ports:
+      - "${HA_ENTRY1_BIND_IP:?set entry-1 WireGuard IP}:2379:2379"
+      - "${HA_ENTRY1_BIND_IP:?set entry-1 WireGuard IP}:2380:2380"
+  data-1:
+    ports:
+      - "${HA_DATA1_BIND_IP:?set data-1 WireGuard IP}:5432:5432"
+      - "${HA_DATA1_BIND_IP:?set data-1 WireGuard IP}:8008:8008"
+  data-2:
+    ports:
+      - "${HA_DATA2_BIND_IP:?set data-2 WireGuard IP}:5432:5432"
+      - "${HA_DATA2_BIND_IP:?set data-2 WireGuard IP}:8008:8008"

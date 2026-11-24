@@ -1,0 +1,49 @@
+# Only used by chain.compose.yaml on its internal network.
+timezone: UTC
+server:
+  host: 0.0.0.0
+  port: 8080
+  mode: release
+database:
+  host: postgres
+  port: 5432
+  user: nexus_chain_fixture
+  password: synthetic-fixture-db-only
+  dbname: nexus_chain_fixture
+  sslmode: disable
+redis:
+  host: redis
+  port: 6379
+jwt:
+  secret: fixture-only-entry-secret-not-for-production
+totp:
+  encryption_key: "1111111111111111111111111111111111111111111111111111111111111111"
+pricing:
+  fallback_file: /rehearsal/model-pricing.json
+  data_dir: /tmp/pricing
+  remote_url: ""
+  hash_url: ""
+security:
+  url_allowlist:
+    enabled: true
+    upstream_hosts: ["api.openai.com"]
+    allow_private_hosts: false
+worker_pool:
+  enabled: false
+  allow_private_h2c: true
+  default_proxy_url: socks5h://fixture:1080
+  fallback_local: false
+  health_interval: 2s
+  health_timeout: 1s
+  selection_policy: round_robin
+  nodes:
+    - id: worker-a
+      url: http://worker-a:9090
+      shared_token: test-rehearsal-only-never-use-in-production
+      weight: 1
+      max_inflight: 8
+    - id: worker-b
+      url: http://worker-b:9090
+      shared_token: test-rehearsal-only-never-use-in-production
+      weight: 1
+      max_inflight: 8

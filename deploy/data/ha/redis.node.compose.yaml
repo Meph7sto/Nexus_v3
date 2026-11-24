@@ -1,0 +1,53 @@
+# Run one project per physical host on the same encrypted private network.
+x-redis-node: &redis-node
+  image: redis:8-alpine
+  restart: unless-stopped
+  environment:
+    HA_REDIS_ANNOUNCE_HOST: "${HA_REDIS_BIND_IP:?set the private host address}"
+    HA_REDIS_INITIAL_MASTER_HOST: "${HA_REDIS_INITIAL_MASTER_HOST:?set the initial primary private address}"
+  configs:
+    - source: redis_launch
+      target: /etc/nexus/redis-launch.sh
+    - source: redis_conf
+      target: /etc/nexus/redis.conf
+    - source: redis_sentinel_conf
+      target: /etc/nexus/redis-sentinel.conf
+
+services:
+  redis:
+    <<: *redis-node
+    profiles: [data]
+    command: ["/bin/sh", "/etc/nexus/redis-launch.sh", "${HA_REDIS_INITIAL_ROLE:-replica}"]
+    secrets: [redis_data_password]
+    ports:
+      - "${HA_REDIS_BIND_IP:?set the private host address}:6379:6379"
+    volumes: [redis_node_data:/data]
+    mem_limit: 320m
+    cpus: "0.5"
+  sentinel:
+    <<: *redis-node
+    command: ["/bin/sh", "/etc/nexus/redis-launch.sh", "sentinel"]
+    secrets: [redis_data_password, redis_sentinel_password]
+    ports:
+      - "${HA_REDIS_BIND_IP:?set the private host address}:26379:26379"
+    volumes: [redis_sentinel_state:/data]
+    mem_limit: 96m
+    cpus: "0.2"
+
+configs:
+  redis_launch:
+    file: ./redis-launch.sh
+  redis_conf:
+    file: ./redis.conf
+  redis_sentinel_conf:
+    file: ./redis-sentinel.conf
+
+secrets:
+  redis_data_password:
+    file: "${HA_REDIS_PASSWORD_FILE:?set HA_REDIS_PASSWORD_FILE}"
+  redis_sentinel_password:
+    file: "${HA_REDIS_SENTINEL_PASSWORD_FILE:?set HA_REDIS_SENTINEL_PASSWORD_FILE}"
+
+volumes:
+  redis_node_data:
+  redis_sentinel_state:

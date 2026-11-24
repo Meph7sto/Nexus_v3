@@ -386,11 +386,12 @@ func ProvideOpenCodeGoUsageService(
 	settingService *SettingService,
 	lockCache LeaderLockCache,
 	db *sql.DB,
+	tasks *SharedTaskGate,
 ) *OpenCodeGoUsageService {
 	svc := NewOpenCodeGoUsageService(accountRepo, httpUpstream, settingService)
 	svc.lockCache = lockCache
 	svc.db = db
-	svc.Start()
+	tasks.Start(svc.Start)
 	return svc
 }
 

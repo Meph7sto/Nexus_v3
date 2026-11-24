@@ -1,0 +1,35 @@
+services:
+  entry:
+    image: "${ENTRY_IMAGE:-nexus-entry:local}"
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+      args:
+        NEXUS_COMMAND: entry
+    env_file:
+      - "${ENTRY_ENV_FILE:?set ENTRY_ENV_FILE to a private environment file}"
+    environment:
+      DATA_DIR: /app/data
+      SERVER_HOST: 0.0.0.0
+      SERVER_PORT: "8080"
+      ENTRY_NODE_SHUTDOWN_TIMEOUT: "${ENTRY_SHUTDOWN_TIMEOUT:-2m}"
+      GOMEMLIMIT: "${ENTRY_GOMEMLIMIT:-650MiB}"
+      GOGC: "${ENTRY_GOGC:-50}"
+      GATEWAY_REQUEST_BODY_MEMORY_BUDGET_BYTES: "${ENTRY_REQUEST_BODY_BUDGET_BYTES:-134217728}"
+      GATEWAY_MAX_BODY_SIZE: "${ENTRY_MAX_BODY_BYTES:-33554432}"
+      GATEWAY_TEXT_MAX_BODY_SIZE: "${ENTRY_MAX_TEXT_BODY_BYTES:-33554432}"
+      REDIS_POOL_SIZE: "${ENTRY_REDIS_POOL_SIZE:-48}"
+      REDIS_MIN_IDLE_CONNS: "${ENTRY_REDIS_MIN_IDLE_CONNS:-8}"
+      DATABASE_MAX_OPEN_CONNS: "${ENTRY_DATABASE_MAX_OPEN_CONNS:-18}"
+      DATABASE_MAX_IDLE_CONNS: "${ENTRY_DATABASE_MAX_IDLE_CONNS:-8}"
+    ports:
+      - "127.0.0.1:${ENTRY_LOCAL_PORT:-8080}:8080"
+    volumes:
+      - "${ENTRY_DATA_DIR:?set ENTRY_DATA_DIR}:/app/data"
+      - "${ENTRY_WORKER_SECRETS_DIR:?set ENTRY_WORKER_SECRETS_DIR}:/run/nexus-worker-secrets:ro"
+    mem_limit: "${ENTRY_MEMORY_LIMIT:-900m}"
+    cpus: "${ENTRY_CPU_LIMIT:-1.0}"
+    restart: unless-stopped
+    stop_grace_period: "${ENTRY_STOP_GRACE_PERIOD:-150s}"
+    security_opt:
+      - no-new-privileges:true

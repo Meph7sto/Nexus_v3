@@ -162,7 +162,7 @@ func (d *SOCKS5ProxyDialer) DialTLSContext(ctx context.Context, network, addr st
 
 	socksDialer, err := proxy.SOCKS5("tcp", proxyAddr, auth, proxy.Direct)
 	if err != nil {
-		slog.Debug("tls_fingerprint_socks5_dialer_failed", "error", err)
+		slog.Debug("tls_fingerprint_socks5_dialer_failed", "error_type", fmt.Sprintf("%T", err))
 		return nil, fmt.Errorf("create SOCKS5 dialer: %w", err)
 	}
 
@@ -170,7 +170,7 @@ func (d *SOCKS5ProxyDialer) DialTLSContext(ctx context.Context, network, addr st
 	slog.Debug("tls_fingerprint_socks5_establishing_tunnel", "target", addr)
 	conn, err := socksDialer.Dial("tcp", addr)
 	if err != nil {
-		slog.Debug("tls_fingerprint_socks5_connect_failed", "error", err)
+		slog.Debug("tls_fingerprint_socks5_connect_failed", "error_type", fmt.Sprintf("%T", err))
 		return nil, fmt.Errorf("SOCKS5 connect: %w", err)
 	}
 	slog.Debug("tls_fingerprint_socks5_tunnel_established")
@@ -200,7 +200,7 @@ func (d *HTTPProxyDialer) DialTLSContext(ctx context.Context, network, addr stri
 	dialer := &net.Dialer{}
 	conn, err := dialer.DialContext(ctx, "tcp", proxyAddr)
 	if err != nil {
-		slog.Debug("tls_fingerprint_http_proxy_connect_failed", "error", err)
+		slog.Debug("tls_fingerprint_http_proxy_connect_failed", "error_type", fmt.Sprintf("%T", err))
 		return nil, fmt.Errorf("connect to proxy: %w", err)
 	}
 	slog.Debug("tls_fingerprint_http_proxy_connected", "proxy_addr", proxyAddr)
@@ -224,7 +224,7 @@ func (d *HTTPProxyDialer) DialTLSContext(ctx context.Context, network, addr stri
 	slog.Debug("tls_fingerprint_http_proxy_sending_connect", "target", addr)
 	if err := req.Write(conn); err != nil {
 		_ = conn.Close()
-		slog.Debug("tls_fingerprint_http_proxy_write_failed", "error", err)
+		slog.Debug("tls_fingerprint_http_proxy_write_failed", "error_type", fmt.Sprintf("%T", err))
 		return nil, fmt.Errorf("write CONNECT request: %w", err)
 	}
 
@@ -233,7 +233,7 @@ func (d *HTTPProxyDialer) DialTLSContext(ctx context.Context, network, addr stri
 	resp, err := http.ReadResponse(br, req)
 	if err != nil {
 		_ = conn.Close()
-		slog.Debug("tls_fingerprint_http_proxy_read_response_failed", "error", err)
+		slog.Debug("tls_fingerprint_http_proxy_read_response_failed", "error_type", fmt.Sprintf("%T", err))
 		return nil, fmt.Errorf("read CONNECT response: %w", err)
 	}
 	// CONNECT response has no body; do not defer resp.Body.Close() as it wraps the
@@ -241,7 +241,7 @@ func (d *HTTPProxyDialer) DialTLSContext(ctx context.Context, network, addr stri
 
 	if resp.StatusCode != http.StatusOK {
 		_ = conn.Close()
-		slog.Debug("tls_fingerprint_http_proxy_connect_failed_status", "status_code", resp.StatusCode, "status", resp.Status)
+		slog.Debug("tls_fingerprint_http_proxy_connect_failed_status", "status_code", resp.StatusCode)
 		return nil, fmt.Errorf("proxy CONNECT failed: %s", resp.Status)
 	}
 	slog.Debug("tls_fingerprint_http_proxy_tunnel_established")
@@ -257,7 +257,7 @@ func (d *Dialer) DialTLSContext(ctx context.Context, network, addr string) (net.
 	slog.Debug("tls_fingerprint_dialing_tcp", "addr", addr)
 	conn, err := d.baseDialer(ctx, network, addr)
 	if err != nil {
-		slog.Debug("tls_fingerprint_tcp_dial_failed", "error", err)
+		slog.Debug("tls_fingerprint_tcp_dial_failed", "error_type", fmt.Sprintf("%T", err))
 		return nil, err
 	}
 	slog.Debug("tls_fingerprint_tcp_connected", "addr", addr)
