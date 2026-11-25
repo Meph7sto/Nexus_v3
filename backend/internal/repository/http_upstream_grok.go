@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/xai"
+	"github.com/Wei-Shaw/sub2api/internal/service"
 	"golang.org/x/mod/semver"
 )
 
@@ -53,6 +54,10 @@ func (t *grokAccessDeniedFallbackTransport) RoundTrip(req *http.Request) (*http.
 	}
 	fallbackResp, fallbackErr := t.base.RoundTrip(fallbackReq)
 	if fallbackErr != nil {
+		if service.IsHTTPUpstreamRelayTerminal(fallbackErr) {
+			_ = resp.Body.Close()
+			return nil, fallbackErr
+		}
 		slog.Debug("grok_cli_access_denied_api_fallback_failed", "error_type", fmt.Sprintf("%T", fallbackErr))
 		return resp, nil
 	}

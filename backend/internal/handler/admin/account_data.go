@@ -36,18 +36,19 @@ type DataPayload struct {
 }
 
 type DataProxy struct {
-	ProxyKey        string `json:"proxy_key"`
-	Name            string `json:"name"`
-	Protocol        string `json:"protocol"`
-	Host            string `json:"host"`
-	Port            int    `json:"port"`
-	Username        string `json:"username,omitempty"`
-	Password        string `json:"password,omitempty"`
-	Status          string `json:"status"`
-	ExpiresAt       *int64 `json:"expires_at,omitempty"`        // unix 秒，与 DataAccount.ExpiresAt 风格一致
-	FallbackMode    string `json:"fallback_mode,omitempty"`     // none/direct/proxy
-	BackupProxyName string `json:"backup_proxy_name,omitempty"` // 备用代理 name（跨实例按 name 反查）
-	ExpiryWarnDays  int    `json:"expiry_warn_days,omitempty"`
+	ProxyKey            string `json:"proxy_key"`
+	CredentialsRequired bool   `json:"credentials_required,omitempty"`
+	Name                string `json:"name"`
+	Protocol            string `json:"protocol"`
+	Host                string `json:"host"`
+	Port                int    `json:"port"`
+	Username            string `json:"username,omitempty"`
+	Password            string `json:"password,omitempty"`
+	Status              string `json:"status"`
+	ExpiresAt           *int64 `json:"expires_at,omitempty"`        // unix 秒，与 DataAccount.ExpiresAt 风格一致
+	FallbackMode        string `json:"fallback_mode,omitempty"`     // none/direct/proxy
+	BackupProxyName     string `json:"backup_proxy_name,omitempty"` // 备用代理 name（跨实例按 name 反查）
+	ExpiryWarnDays      int    `json:"expiry_warn_days,omitempty"`
 }
 
 // DataAccount 是管理员显式备份导出使用的账号结构，故意不走 dto.Account 的脱敏路径，
@@ -89,8 +90,16 @@ type DataImportResult struct {
 type DataImportError struct {
 	Kind     string `json:"kind"`
 	Name     string `json:"name,omitempty"`
-	ProxyKey string `json:"proxy_key,omitempty"`
+	ProxyKey string `json:"-"`
 	Message  string `json:"message"`
+}
+
+// The export reference links records within the payload, without embedding credentials.
+func exportProxyKey(p service.Proxy) string {
+	if p.Username != "" || p.Password != "" {
+		return fmt.Sprintf("proxy-reference:%d", p.ID)
+	}
+	return buildProxyKey(p.Protocol, p.Host, p.Port, "", "")
 }
 
 func buildProxyKey(protocol, host string, port int, username, password string) string {
@@ -157,7 +166,7 @@ func (h *AccountHandler) ExportData(c *gin.Context) {
 	dataProxies := make([]DataProxy, 0, len(proxies))
 	for i := range proxies {
 		p := proxies[i]
-		key := buildProxyKey(p.Protocol, p.Host, p.Port, p.Username, p.Password)
+		key := exportProxyKey(p)
 		proxyKeyByID[p.ID] = key
 
 		var expiresAt *int64
@@ -170,18 +179,17 @@ func (h *AccountHandler) ExportData(c *gin.Context) {
 			backupProxyName = proxyNameByID[*p.BackupProxyID]
 		}
 		dataProxies = append(dataProxies, DataProxy{
-			ProxyKey:        key,
-			Name:            p.Name,
-			Protocol:        p.Protocol,
-			Host:            p.Host,
-			Port:            p.Port,
-			Username:        p.Username,
-			Password:        p.Password,
-			Status:          p.Status,
-			ExpiresAt:       expiresAt,
-			FallbackMode:    p.FallbackMode,
-			BackupProxyName: backupProxyName,
-			ExpiryWarnDays:  p.ExpiryWarnDays,
+			ProxyKey:            key,
+			Name:                p.Name,
+			Protocol:            p.Protocol,
+			Host:                p.Host,
+			Port:                p.Port,
+			CredentialsRequired: p.Username != "" || p.Password != "",
+			Status:              p.Status,
+			ExpiresAt:           expiresAt,
+			FallbackMode:        p.FallbackMode,
+			BackupProxyName:     backupProxyName,
+			ExpiryWarnDays:      p.ExpiryWarnDays,
 		})
 	}
 
@@ -285,7 +293,7 @@ func (h *AccountHandler) importData(ctx context.Context, req DataImportRequest) 
 			continue
 		}
 		normalizedStatus := normalizeProxyStatus(item.Status)
-		if existingID, ok := proxyKeyToID[key]; ok {
+		if existingID, ok := proxyKeyToID[buildProxyKey(item.Protocol, item.Host, item.Port, item.Username, item.Password)]; ok {
 			proxyKeyToID[key] = existingID
 			result.ProxyReused++
 			if normalizedStatus != "" {
@@ -656,6 +664,9 @@ func validateDataHeader(payload DataPayload) error {
 }
 
 func validateDataProxy(item DataProxy) error {
+	if item.CredentialsRequired && item.Username == "" && item.Password == "" {
+		return fmt.Errorf("supply proxy credentials before import")
+	}
 	if strings.TrimSpace(item.Protocol) == "" {
 		return errors.New("proxy protocol is required")
 	}

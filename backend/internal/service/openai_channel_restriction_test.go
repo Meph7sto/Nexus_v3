@@ -116,6 +116,9 @@ func TestIsUpstreamModelRestrictedByChannel_CompactMappingMatchesForwardPath(t *
 	for _, tt := range tests {
 		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
+			// Account model mapping is lazily cached on the account value.
+			fixture := *account
+			account := &fixture
 			t.Parallel()
 
 			channelSvc := newTestChannelService(makeStandardRepo(Channel{
@@ -185,6 +188,8 @@ func TestIsUpstreamModelRestrictedByChannel_PassthroughMatchesForwardPath(t *tes
 	for _, tt := range tests {
 		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
+			fixture := *account
+			account := &fixture
 			t.Parallel()
 
 			channelSvc := newTestChannelService(makeStandardRepo(Channel{

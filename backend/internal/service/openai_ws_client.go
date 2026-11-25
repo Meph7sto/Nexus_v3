@@ -3,7 +3,6 @@ package service
 import (
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -118,13 +117,18 @@ func (d *coderOpenAIWSClientDialer) Dial(
 	headers http.Header,
 	proxyURL string,
 ) (openAIWSClientConn, int, http.Header, error) {
+	return d.dial(ctx, wsURL, headers, proxyURL, nil)
+}
+
+func (d *coderOpenAIWSClientDialer) dial(ctx context.Context, wsURL string, headers http.Header, proxyURL string, client *http.Client) (openAIWSClientConn, int, http.Header, error) {
 	targetURL := strings.TrimSpace(wsURL)
 	if targetURL == "" {
 		return nil, 0, nil, errors.New("ws url is empty")
 	}
 
-	wrapped := &coderOpenAIWSClientConn{}
+	wrapped := &coderOpenAIWSClientConn{relayed: client != nil}
 	opts := &coderws.DialOptions{
+		HTTPClient:      client,
 		HTTPHeader:      cloneHeader(headers),
 		CompressionMode: coderws.CompressionContextTakeover,
 		OnPingReceived: func(context.Context, []byte) bool {
@@ -153,6 +157,16 @@ func (d *coderOpenAIWSClientDialer) Dial(
 			body, _ = io.ReadAll(io.LimitReader(resp.Body, 8<<10))
 			_ = resp.Body.Close()
 		}
+		var relay *HTTPUpstreamRelayError
+		if errors.As(err, &relay) {
+			return nil, 0, nil, relay
+		}
+		if client != nil && !errors.Is(err, ErrWorkerWebSocketLocalFallback) {
+			if status == 0 || status == http.StatusSwitchingProtocols {
+				return nil, status, nil, &HTTPUpstreamRelayError{Origin: HTTPUpstreamRelayLink, Err: err}
+			}
+			err = errors.New("upstream websocket handshake failed")
+		}
 		return nil, status, respHeaders, &openAIWSHandshakeError{Body: body, Err: err}
 	}
 	// coder/websocket 默认单消息读取上限为 32KB，Codex WS 事件（如 rate_limits/大 delta）
@@ -176,7 +190,7 @@ func (d *coderOpenAIWSClientDialer) proxyHTTPClient(proxy string) (*http.Client,
 	}
 	parsedProxyURL, err := url.Parse(normalizedProxy)
 	if err != nil {
-		return nil, fmt.Errorf("invalid proxy url: %w", err)
+		return nil, errors.New("invalid proxy url")
 	}
 	now := time.Now().UnixNano()
 
@@ -291,6 +305,7 @@ func (d *coderOpenAIWSClientDialer) SnapshotTransportMetrics() OpenAIWSTransport
 type coderOpenAIWSClientConn struct {
 	conn          *coderws.Conn
 	upstreamPings atomic.Int64
+	relayed       bool
 }
 
 func (c *coderOpenAIWSClientConn) UpstreamPingCount() int64 {
@@ -302,6 +317,13 @@ func (c *coderOpenAIWSClientConn) UpstreamPingCount() int64 {
 
 var _ openaiwsv2.FrameConn = (*coderOpenAIWSClientConn)(nil)
 
+func (c *coderOpenAIWSClientConn) transportError(err error) error {
+	if err != nil && c.relayed {
+		return &HTTPUpstreamRelayError{Origin: HTTPUpstreamRelayLink, Err: err}
+	}
+	return err
+}
+
 func (c *coderOpenAIWSClientConn) WriteJSON(ctx context.Context, value any) error {
 	if c == nil || c.conn == nil {
 		return errOpenAIWSConnClosed
@@ -309,7 +331,7 @@ func (c *coderOpenAIWSClientConn) WriteJSON(ctx context.Context, value any) erro
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	return wsjson.Write(ctx, c.conn, value)
+	return c.transportError(wsjson.Write(ctx, c.conn, value))
 }
 
 func (c *coderOpenAIWSClientConn) ReadMessage(ctx context.Context) ([]byte, error) {
@@ -322,7 +344,7 @@ func (c *coderOpenAIWSClientConn) ReadMessage(ctx context.Context) ([]byte, erro
 
 	msgType, payload, err := c.conn.Read(ctx)
 	if err != nil {
-		return nil, err
+		return nil, c.transportError(err)
 	}
 	switch msgType {
 	case coderws.MessageText, coderws.MessageBinary:
@@ -341,7 +363,7 @@ func (c *coderOpenAIWSClientConn) ReadFrame(ctx context.Context) (coderws.Messag
 	}
 	msgType, payload, err := c.conn.Read(ctx)
 	if err != nil {
-		return coderws.MessageText, nil, err
+		return coderws.MessageText, nil, c.transportError(err)
 	}
 	return msgType, payload, nil
 }
@@ -353,7 +375,7 @@ func (c *coderOpenAIWSClientConn) WriteFrame(ctx context.Context, msgType coderw
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	return c.conn.Write(ctx, msgType, payload)
+	return c.transportError(c.conn.Write(ctx, msgType, payload))
 }
 
 func (c *coderOpenAIWSClientConn) Ping(ctx context.Context) error {
@@ -363,7 +385,7 @@ func (c *coderOpenAIWSClientConn) Ping(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	return c.conn.Ping(ctx)
+	return c.transportError(c.conn.Ping(ctx))
 }
 
 // SupportsIdlePingWithoutReader reports the actual coder/websocket contract.

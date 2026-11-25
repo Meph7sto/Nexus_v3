@@ -19,6 +19,10 @@ func NewHTTPUpstream(cfg *config.Config) service.HTTPUpstream {
 	return &httpUpstreamService{client: upstream.NewClient(upstreamConfig(cfg))}
 }
 
+func (s *httpUpstreamService) workerResponseHeaderTimeout(req *http.Request) time.Duration {
+	return s.client.ResponseHeaderTimeout(upstream.Profile(service.HTTPUpstreamProfileFromContext(req.Context())))
+}
+
 func (s *httpUpstreamService) Do(req *http.Request, proxyURL string, accountID int64, accountConcurrency int) (*http.Response, error) {
 	applyGrokCLIProxyHeaders(req)
 	return s.client.Do(req, proxyURL, accountID, accountConcurrency, upstreamRequestOptions(req))
@@ -29,6 +33,8 @@ func (s *httpUpstreamService) DoWithTLS(req *http.Request, proxyURL string, acco
 	return s.client.DoWithTLS(req, proxyURL, accountID, accountConcurrency, profile, upstreamRequestOptions(req))
 }
 
+type grokRelayHandledKey struct{}
+
 func upstreamRequestOptions(req *http.Request) upstream.RequestOptions {
 	opts := upstream.RequestOptions{
 		WrapTransport: func(base http.RoundTripper) http.RoundTripper {
@@ -37,6 +43,9 @@ func upstreamRequestOptions(req *http.Request) upstream.RequestOptions {
 	}
 	if req != nil {
 		ctx := req.Context()
+		if handled, _ := ctx.Value(grokRelayHandledKey{}).(bool); handled {
+			opts.WrapTransport = nil
+		}
 		opts.Profile = upstream.Profile(service.HTTPUpstreamProfileFromContext(ctx))
 		opts.RedirectsDisabled = service.HTTPUpstreamRedirectsDisabled(ctx)
 		opts.PublicHostsOnly = service.HTTPUpstreamPublicHostsOnly(ctx)

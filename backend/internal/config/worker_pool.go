@@ -3,11 +3,9 @@ package config
 import (
 	"fmt"
 	"time"
-
-	"github.com/Wei-Shaw/sub2api/internal/pkg/proxyurl"
 )
 
-// WorkerPoolConfig describes the opt-in static pool used by the Responses pilot.
+// WorkerPoolConfig describes the upstream relay pool and its local fallback policy.
 type WorkerPoolConfig struct {
 	Enabled                 bool                  `mapstructure:"enabled"`
 	Nodes                   []WorkerNodeConfig    `mapstructure:"nodes"`
@@ -50,10 +48,6 @@ func (c WorkerPoolConfig) validate() error {
 	}
 	if len(c.Nodes) == 0 {
 		return fmt.Errorf("worker_pool.nodes is required when enabled")
-	}
-	_, proxy, err := proxyurl.Parse(c.DefaultProxyURL)
-	if err != nil || proxy == nil || (proxy.Scheme != "socks5" && proxy.Scheme != "socks5h") {
-		return fmt.Errorf("worker_pool.default_proxy_url must be a SOCKS5 URL")
 	}
 	if c.HealthInterval < 0 || c.HealthTimeout < 0 || c.MaxAttempts < 0 {
 		return fmt.Errorf("worker_pool health timings and max_attempts must be non-negative")

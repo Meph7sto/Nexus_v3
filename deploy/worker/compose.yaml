@@ -10,7 +10,6 @@ services:
       WORKER_LISTEN_ADDR: 0.0.0.0:9090
       WORKER_NODE_ID: "${WORKER_NODE_ID:?set the Worker ID}"
       WORKER_SHARED_TOKEN_FILE: /run/nexus-worker-secrets/shared-token
-      WORKER_ALLOWED_TARGETS: api.openai.com
       WORKER_MAX_INFLIGHT: "${WORKER_MAX_INFLIGHT:-32}"
       WORKER_MAX_CONNECTIONS: "${WORKER_MAX_CONNECTIONS:-64}"
       WORKER_DRAIN_TIMEOUT: "${WORKER_DRAIN_TIMEOUT:-2m}"

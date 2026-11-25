@@ -73,7 +73,7 @@ export default {
       dataExportConfirm: 'Confirm Export',
       dataExported: 'Data exported successfully',
       dataExportFailed: 'Failed to export data',
-      copyProxyUrl: 'Copy Proxy URL',
+      copyProxyUrl: 'Copy proxy URL without credentials',
       urlCopied: 'Proxy URL copied',
       searchProxies: 'Search proxies...',
       allProtocols: 'All Protocols',

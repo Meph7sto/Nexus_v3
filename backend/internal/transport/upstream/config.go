@@ -30,8 +30,9 @@ type Config struct {
 	OpenAIHTTP2                 OpenAIHTTP2Config
 	// DialAddresses returns validated IPs with the original port. ProxyDNS also
 	// permits the original authority, exclusively through an explicit SOCKS proxy.
-	DialAddresses func(context.Context, string, string) ([]string, error)
-	ProxyDNS      bool
+	DialAddresses  func(context.Context, string, string) ([]string, error)
+	ProxyDNS       bool
+	ProxyAddresses func(context.Context, string, string) ([]string, error)
 	// MaxConnections bounds actual connections across all pooled clients.
 	// Zero retains the existing per-client limits.
 	MaxConnections int

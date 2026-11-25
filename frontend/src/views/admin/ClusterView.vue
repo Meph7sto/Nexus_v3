@@ -270,6 +270,7 @@
       </BaseDialog>
 
       <BaseDialog :show="template !== null" :title="label('join')" @close="template = null">
+        <p class="mb-2 text-sm">{{ label('joinRoutes') }}</p>
         <pre class="max-w-full whitespace-pre-wrap break-words rounded-md bg-gray-100 p-3 text-xs">{{ template }}</pre>
       </BaseDialog>
       <TotpStepUpDialog :controller="stepUp" />

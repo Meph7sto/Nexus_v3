@@ -286,6 +286,54 @@ func (r *accountRepository) GetByID(ctx context.Context, id int64) (*service.Acc
 	return &accounts[0], nil
 }
 
+// Resolve expired routes without waiting for the periodic fallback sweep to
+// rewrite the account. The snapshot is per request; no account is mutated.
+func (r *accountRepository) GetForWorkerRequest(ctx context.Context, id int64) (*service.Account, error) {
+	a, err := r.GetByID(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if a == nil {
+		return nil, service.ErrAccountNotFound
+	}
+	if a.ProxyID != nil && a.Proxy == nil {
+		return nil, errors.New("account proxy is unavailable")
+	}
+	now := time.Now()
+	if a.Proxy == nil || !a.Proxy.IsExpired(now) || a.Proxy.FallbackMode == service.FallbackModeNone {
+		return a, nil
+	}
+	byID := map[int64]service.Proxy{}
+	for p := a.Proxy; p.FallbackMode == service.FallbackModeProxy && p.BackupProxyID != nil; {
+		id := *p.BackupProxyID
+		if _, seen := byID[id]; seen || id == a.Proxy.ID {
+			break
+		}
+		row, err := r.client.Proxy.Get(ctx, id)
+		if dbent.IsNotFound(err) {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+		p = proxyEntityToService(row)
+		byID[id] = *p
+		if p.IsActive() && !p.IsExpired(now) {
+			break
+		}
+	}
+	target, change := service.ResolveProxyFallbackTarget(*a.Proxy, byID, now)
+	if change {
+		a.ProxyID = target
+		a.Proxy = nil
+		if target != nil {
+			p := byID[*target]
+			a.Proxy = &p
+		}
+	}
+	return a, nil
+}
+
 func (r *accountRepository) GetByIDs(ctx context.Context, ids []int64) ([]*service.Account, error) {
 	if len(ids) == 0 {
 		return []*service.Account{}, nil

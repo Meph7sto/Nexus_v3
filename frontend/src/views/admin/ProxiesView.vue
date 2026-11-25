@@ -146,7 +146,7 @@
 
           <template #cell-address="{ row }">
             <div class="flex items-center gap-1.5">
-              <code class="code text-xs">{{ row.host }}:{{ row.port }}</code>
+              <code class="code text-xs">{{ proxyAddress(row) }}</code>
               <div class="relative">
                 <button
                   type="button"
@@ -176,22 +176,7 @@
           </template>
 
           <template #cell-auth="{ row }">
-            <div v-if="row.username || row.password" class="flex items-center gap-1.5">
-              <div class="flex flex-col text-xs">
-                <span v-if="row.username" class="text-gray-700 ">{{ row.username }}</span>
-                <span v-if="row.password" class="font-mono text-gray-500 ">
-                  {{ visiblePasswordIds.has(row.id) ? row.password : '••••••' }}
-                </span>
-              </div>
-              <button
-                v-if="row.password"
-                type="button"
-                class="ml-1 rounded p-0.5 text-gray-400 hover:text-gray-600 "
-                @click.stop="visiblePasswordIds.has(row.id) ? visiblePasswordIds.delete(row.id) : visiblePasswordIds.add(row.id)"
-              >
-                <Icon :name="visiblePasswordIds.has(row.id) ? 'eyeOff' : 'eye'" size="sm" />
-              </button>
-            </div>
+            <span v-if="row.has_credentials" class="font-mono text-gray-500">••••••</span>
             <span v-else class="text-sm text-gray-400">-</span>
           </template>
 
@@ -730,7 +715,7 @@
         </div>
         <div>
           <label class="input-label">{{ t('admin.proxies.username') }}</label>
-          <input v-model="editForm.username" type="text" class="input" />
+          <input v-model="editForm.username" type="text" autocomplete="username" class="input" :placeholder="t('admin.proxies.leaveEmptyToKeep')" @input="editUsernameDirty = true" />
         </div>
         <div>
           <label class="input-label">{{ t('admin.proxies.password') }}</label>
@@ -1078,7 +1063,7 @@ const editStatusOptions = computed(() => [
 ])
 
 const proxies = ref<Proxy[]>([])
-const visiblePasswordIds = reactive(new Set<number>())
+const editUsernameDirty = ref(false)
 const copyMenuProxyId = ref<number | null>(null)
 const loading = ref(false)
 const searchQuery = ref('')
@@ -1460,8 +1445,9 @@ const handleEdit = (proxy: Proxy) => {
   editForm.protocol = proxy.protocol
   editForm.host = proxy.host
   editForm.port = proxy.port
-  editForm.username = proxy.username || ''
-  editForm.password = proxy.password || ''
+  editUsernameDirty.value = false
+  editForm.username = ''
+  editForm.password = ''
   editForm.status = proxy.status === 'expired' ? 'inactive' : proxy.status
   editForm.expires_at = proxy.expires_at ? proxy.expires_at.slice(0, 10) : ''
   editForm.fallback_mode = proxy.fallback_mode || 'none'
@@ -1501,7 +1487,7 @@ const handleUpdateProxy = async () => {
       protocol: editForm.protocol,
       host: editForm.host.trim(),
       port: editForm.port,
-      username: editForm.username.trim(),
+      ...(editUsernameDirty.value ? { username: editForm.username.trim() } : {}),
       status: editForm.status,
       expires_at: editForm.expires_at ? Math.floor(new Date(editForm.expires_at).getTime() / 1000) : null,
       fallback_mode: editForm.fallback_mode,
@@ -2069,35 +2055,20 @@ const closeAccountsModal = () => {
   proxyAccounts.value = []
 }
 
-// ── Proxy URL copy ──
-function buildAuthPart(row: any): string {
-  const user = row.username ? encodeURIComponent(row.username) : ''
-  const pass = row.password ? encodeURIComponent(row.password) : ''
-  if (user && pass) return `${user}:${pass}@`
-  if (user) return `${user}@`
-  if (pass) return `:${pass}@`
-  return ''
+function proxyAddress(row: Proxy): string {
+  const host = row.host.includes(':') && !row.host.startsWith('[') ? `[${row.host}]` : row.host
+  return `${host}:${row.port}`
 }
 
-function buildProxyUrl(row: any): string {
-  return `${row.protocol}://${buildAuthPart(row)}${row.host}:${row.port}`
+function buildProxyUrl(row: Proxy): string {
+  return `${row.protocol}://${proxyAddress(row)}`
 }
 
-function getCopyFormats(row: any) {
-  const hasAuth = row.username || row.password
-  const fullUrl = buildProxyUrl(row)
-  const formats = [
-    { label: fullUrl, value: fullUrl },
-  ]
-  if (hasAuth) {
-    const withoutProtocol = fullUrl.replace(/^[^:]+:\/\//, '')
-    formats.push({ label: withoutProtocol, value: withoutProtocol })
-  }
-  formats.push({ label: `${row.host}:${row.port}`, value: `${row.host}:${row.port}` })
-  return formats
+function getCopyFormats(row: Proxy) {
+  return [buildProxyUrl(row), proxyAddress(row)].map(value => ({ label: value, value }))
 }
 
-function copyProxyUrl(row: any) {
+function copyProxyUrl(row: Proxy) {
   copyToClipboard(buildProxyUrl(row), t('admin.proxies.urlCopied'))
   copyMenuProxyId.value = null
 }

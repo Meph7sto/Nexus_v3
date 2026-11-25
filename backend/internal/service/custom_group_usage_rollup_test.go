@@ -3,6 +3,8 @@
 package service
 
 import (
+	"os"
+	"os/exec"
 	"testing"
 	"time"
 
@@ -10,16 +12,25 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func useGroupUsageTestTimezone(t *testing.T, name string) {
+func useGroupUsageTestTimezone(t *testing.T, name string) bool {
 	t.Helper()
 
-	previousName := appTimezone.Name()
+	// time.Local is process-global; other tests may have live background workers.
+	if os.Getenv("NEXUS_GROUP_USAGE_TZ_CHILD") != name {
+		cmd := exec.Command(os.Args[0], "-test.run=^"+t.Name()+"$")
+		cmd.Env = append(os.Environ(), "NEXUS_GROUP_USAGE_TZ_CHILD="+name)
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, "%s", out)
+		return false
+	}
 	require.NoError(t, appTimezone.Init(name))
-	t.Cleanup(func() { require.NoError(t, appTimezone.Init(previousName)) })
+	return true
 }
 
 func TestGroupUsageDateUsesConfiguredTimezoneBoundary(t *testing.T) {
-	useGroupUsageTestTimezone(t, "America/New_York")
+	if !useGroupUsageTestTimezone(t, "America/New_York") {
+		return
+	}
 
 	beforeMidnight := time.Date(2026, 3, 9, 3, 59, 59, 0, time.UTC)
 	atMidnight := time.Date(2026, 3, 9, 4, 0, 0, 0, time.UTC)
@@ -30,7 +41,9 @@ func TestGroupUsageDateUsesConfiguredTimezoneBoundary(t *testing.T) {
 }
 
 func TestGroupUsageParseDateUsesConfiguredTimezone(t *testing.T) {
-	useGroupUsageTestTimezone(t, "America/New_York")
+	if !useGroupUsageTestTimezone(t, "America/New_York") {
+		return
+	}
 
 	parsed, err := ParseGroupUsageDate("2026-03-08")
 	require.NoError(t, err)
@@ -39,7 +52,9 @@ func TestGroupUsageParseDateUsesConfiguredTimezone(t *testing.T) {
 }
 
 func TestGroupUsageYesterdayStartHandlesDST(t *testing.T) {
-	useGroupUsageTestTimezone(t, "America/New_York")
+	if !useGroupUsageTestTimezone(t, "America/New_York") {
+		return
+	}
 
 	todayStart := time.Date(2026, 3, 9, 4, 0, 0, 0, time.UTC)
 	yesterdayStart := GroupUsageYesterdayStart(todayStart)

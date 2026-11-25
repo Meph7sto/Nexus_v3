@@ -27,8 +27,6 @@ services:
       WORKER_NODE_ID: worker-a
       WORKER_ALLOW_PRIVATE_H2C: "true"
       WORKER_SHARED_TOKEN: test-rehearsal-only-never-use-in-production
-      WORKER_ALLOWED_TARGETS: api.openai.com
-      WORKER_PROXY_URL: socks5h://fixture:1080
       WORKER_MAX_INFLIGHT: "8"
   worker-b:
     image: alpine:3.23

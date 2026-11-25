@@ -36,6 +36,8 @@ type Server struct {
 	targets      targetPolicy
 	proxyURL     string
 	upstream     Upstream
+	client       *upstream.Client
+	legacyClient *upstream.Client
 	tokens       [2][sha256.Size]byte
 	hasPrevious  int
 
@@ -64,7 +66,9 @@ func New(cfg Config, forward Upstream) (*Server, error) {
 	switch cfg.DNSMode {
 	case "", "local":
 	case "trusted_proxy":
-		targets.proxyDNS = true
+		if len(targets.authorities) == 0 || cfg.ProxyURL == "" || cfg.MaxConnections < 2 {
+			return nil, errors.New("trusted_proxy needs an explicit legacy proxy, target allowlist and at least two connections")
+		}
 	default:
 		return nil, errors.New("WORKER_DNS_MODE must be local or trusted_proxy")
 	}
@@ -75,28 +79,49 @@ func New(cfg Config, forward Upstream) (*Server, error) {
 			return nil, errors.New("WORKER_PROXY_URL must be a configured SOCKS5 endpoint")
 		}
 		cfg.ProxyURL = parsed.String()
-	} else if forward == nil {
-		return nil, errors.New("WORKER_PROXY_URL is required")
 	}
+	var proxyPolicy func(context.Context, string, string) ([]string, error)
+	if cfg.AllowPrivateProxy != nil && !*cfg.AllowPrivateProxy {
+		proxyPolicy = (targetPolicy{lookupIP: net.DefaultResolver.LookupNetIP}).dialAddresses
+	}
+	transportConfig := upstream.Config{
+		ConnectionPoolIsolation:   upstream.ConnectionPoolIsolationAccountProxy,
+		MaxIdleConns:              min(64, cfg.MaxConnections),
+		MaxIdleConnsPerHost:       min(16, cfg.MaxConnections),
+		MaxConnsPerHost:           cfg.MaxConnections,
+		MaxUpstreamClients:        max(128, min(cfg.MaxInFlight, 1024)),
+		ClientIdleTTL:             5 * time.Minute,
+		GrokResponseHeaderTimeout: 120 * time.Second,
+		UpstreamDrainTimeout:      cfg.DrainTimeout,
+		ProxyAddresses:            proxyPolicy,
+		IdleConnTimeout:           45 * time.Second,
+		ResponseHeaderTimeout:     600 * time.Second,
+		OpenAIHTTP2: upstream.OpenAIHTTP2Config{
+			Enabled: true,
+		},
+		DialAddresses:  targets.dialAddresses,
+		ProxyDNS:       targets.proxyDNS,
+		MaxConnections: cfg.MaxConnections,
+	}
+	var legacy *upstream.Client
+	if cfg.DNSMode == "trusted_proxy" {
+		legacyConfig := transportConfig
+		legacyConfig.MaxConnections = cfg.MaxConnections / 2
+		legacyConfig.MaxUpstreamClients /= 2
+		transportConfig.MaxConnections -= legacyConfig.MaxConnections
+		transportConfig.MaxUpstreamClients -= legacyConfig.MaxUpstreamClients
+		legacyTargets := targets
+		legacyTargets.proxyDNS = true
+		legacyConfig.ProxyDNS = true
+		legacyConfig.DialAddresses = legacyTargets.dialAddresses
+		legacy = upstream.NewClient(&legacyConfig)
+	}
+	client := upstream.NewClient(&transportConfig)
 	if forward == nil {
-		forward = upstream.NewClient(&upstream.Config{
-			ConnectionPoolIsolation:     upstream.ConnectionPoolIsolationAccountProxy,
-			MaxIdleConns:                min(64, cfg.MaxConnections),
-			MaxIdleConnsPerHost:         min(16, cfg.MaxConnections),
-			MaxConnsPerHost:             cfg.MaxConnections,
-			MaxUpstreamClients:          max(128, cfg.MaxInFlight),
-			IdleConnTimeout:             45 * time.Second,
-			ResponseHeaderTimeout:       60 * time.Second,
-			OpenAIResponseHeaderTimeout: 120 * time.Second,
-			OpenAIHTTP2: upstream.OpenAIHTTP2Config{
-				Enabled: true,
-			},
-			DialAddresses:  targets.dialAddresses,
-			ProxyDNS:       targets.proxyDNS,
-			MaxConnections: cfg.MaxConnections,
-		})
+		forward = client
 	}
 	s := &Server{
+		client: client, legacyClient: legacy,
 		addr:         cfg.ListenAddr,
 		nodeID:       cfg.NodeID,
 		version:      cfg.Version,
@@ -145,7 +170,7 @@ func (s *Server) auth(h http.Header) bool {
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch r.URL.Path {
-	case workerproto.HealthPath, workerproto.RelayPath, workerproto.DrainPath:
+	case workerproto.HealthPath, workerproto.RelayPath, workerproto.WSRelayPath, workerproto.DrainPath:
 		if !s.auth(r.Header) {
 			w.Header().Set("WWW-Authenticate", "Bearer")
 			writeRelayError(w, http.StatusUnauthorized, workerproto.CodeUnauthorized, workerproto.OutcomeUnsent)
@@ -165,6 +190,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case workerproto.RelayPath:
 		if r.Method == http.MethodPost {
 			s.relay(w, r)
+			return
+		}
+		w.Header().Set("Allow", http.MethodPost)
+	case workerproto.WSRelayPath:
+		if r.Method == http.MethodPost {
+			s.wsRelay(w, r)
 			return
 		}
 		w.Header().Set("Allow", http.MethodPost)

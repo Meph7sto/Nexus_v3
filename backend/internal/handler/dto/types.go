@@ -246,7 +246,7 @@ type Account struct {
 	AutoPauseOnExpired      bool                              `json:"auto_pause_on_expired"`
 	CreatedAt               time.Time                         `json:"created_at"`
 	UpdatedAt               time.Time                         `json:"updated_at"`
-	OpenCodeGoUsage         *service.OpenCodeGoUsageState  `json:"opencode_go_usage,omitempty"`
+	OpenCodeGoUsage         *service.OpenCodeGoUsageState     `json:"opencode_go_usage,omitempty"`
 
 	Schedulable bool `json:"schedulable"`
 
@@ -370,7 +370,7 @@ type AccountListItem struct {
 	Extra             map[string]any                    `json:"extra,omitempty"`
 	OllamaCloudUsage  *service.OllamaCloudUsageState    `json:"ollama_cloud_usage,omitempty"`
 	CodexTurnTickets  []service.OpenAICodexTicketStatus `json:"codex_turn_tickets,omitempty"`
-	OpenCodeGoUsage   *service.OpenCodeGoUsageState  `json:"opencode_go_usage,omitempty"`
+	OpenCodeGoUsage   *service.OpenCodeGoUsageState     `json:"opencode_go_usage,omitempty"`
 
 	ProxyID                 *int64     `json:"proxy_id"`
 	ProxyFallbackOriginID   *int64     `json:"proxy_fallback_origin_id"`
@@ -462,16 +462,15 @@ type AccountGroup struct {
 }
 
 type Proxy struct {
-	ID        int64     `json:"id"`
-	Name      string    `json:"name"`
-	Protocol  string    `json:"protocol"`
-	Host      string    `json:"host"`
-	Port      int       `json:"port"`
-	Username  string    `json:"username"`
-	Password  string    `json:"-"`
-	Status    string    `json:"status"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	ID             int64     `json:"id"`
+	Name           string    `json:"name"`
+	Protocol       string    `json:"protocol"`
+	Host           string    `json:"host"`
+	Port           int       `json:"port"`
+	HasCredentials bool      `json:"has_credentials"`
+	Status         string    `json:"status"`
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
 
 	ExpiresAt      *time.Time `json:"expires_at"`
 	FallbackMode   string     `json:"fallback_mode"`
@@ -497,12 +496,7 @@ type ProxyWithAccountCount struct {
 	QualityChecked *int64 `json:"quality_checked,omitempty"`
 }
 
-// AdminProxy 是管理员接口使用的 proxy DTO（包含密码等敏感字段）。
-// 注意：普通接口不得使用此 DTO。
-type AdminProxy struct {
-	Proxy
-	Password string `json:"password,omitempty"`
-}
+type AdminProxy struct{ Proxy }
 
 // AdminProxyWithAccountCount 是管理员接口使用的带账号统计的 proxy DTO。
 type AdminProxyWithAccountCount struct {

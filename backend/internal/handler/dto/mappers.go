@@ -564,7 +564,7 @@ func ProxyFromService(p *service.Proxy) *Proxy {
 		Protocol:       p.Protocol,
 		Host:           p.Host,
 		Port:           p.Port,
-		Username:       p.Username,
+		HasCredentials: p.Username != "" || p.Password != "",
 		Status:         p.Status,
 		CreatedAt:      p.CreatedAt,
 		UpdatedAt:      p.UpdatedAt,
@@ -599,7 +599,7 @@ func ProxyWithAccountCountFromService(p *service.ProxyWithAccountCount) *ProxyWi
 }
 
 // ProxyFromServiceAdmin converts a service Proxy to AdminProxy DTO for admin users.
-// It includes the password field - user-facing endpoints must not use this.
+// Credentials are write-only on both admin and user endpoints.
 func ProxyFromServiceAdmin(p *service.Proxy) *AdminProxy {
 	if p == nil {
 		return nil
@@ -609,13 +609,11 @@ func ProxyFromServiceAdmin(p *service.Proxy) *AdminProxy {
 		return nil
 	}
 	return &AdminProxy{
-		Proxy:    *base,
-		Password: p.Password,
+		Proxy: *base,
 	}
 }
 
 // ProxyWithAccountCountFromServiceAdmin converts a service ProxyWithAccountCount to AdminProxyWithAccountCount DTO.
-// It includes the password field - user-facing endpoints must not use this.
 func ProxyWithAccountCountFromServiceAdmin(p *service.ProxyWithAccountCount) *AdminProxyWithAccountCount {
 	if p == nil {
 		return nil

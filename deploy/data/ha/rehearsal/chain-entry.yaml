@@ -31,7 +31,6 @@ security:
 worker_pool:
   enabled: false
   allow_private_h2c: true
-  default_proxy_url: socks5h://fixture:1080
   fallback_local: false
   health_interval: 2s
   health_timeout: 1s

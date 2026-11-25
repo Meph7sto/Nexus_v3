@@ -9,14 +9,39 @@ import (
 type distributedHTTPUpstreamKey struct{}
 type distributedHTTPUpstreamResponseKey struct{}
 
-// WithDistributedHTTPUpstream allows the transport to use the configured Worker pool.
-func WithDistributedHTTPUpstream(ctx context.Context) context.Context {
+// Scheduling snapshots may lag an admin commit. Refresh the selected account,
+// not the entire candidate list, before deriving proxy and provider headers.
+func loadWorkerAccount(ctx context.Context, transport HTTPUpstream, repo AccountRepository, id int64) (*Account, bool, error) {
+	p, ok := transport.(workerWebSocketProvider)
+	if !ok || p.WorkerWebSocketRoute() == nil || repo == nil {
+		return nil, false, nil
+	}
+	if r, ok := repo.(interface {
+		GetForWorkerRequest(context.Context, int64) (*Account, error)
+	}); ok {
+		account, err := r.GetForWorkerRequest(ctx, id)
+		return account, true, err
+	}
+	account, err := repo.GetByID(ctx, id)
+	return account, true, err
+}
+func loadAccountForUpstream(ctx context.Context, transport HTTPUpstream, repo AccountRepository, id int64) (*Account, error) {
+	if a, ok, err := loadWorkerAccount(ctx, transport, repo, id); ok {
+		return a, err
+	}
+	return repo.GetByID(ctx, id)
+}
+
+// WithDistributedHTTPUpstream is retained for callers predating default Worker routing.
+func WithDistributedHTTPUpstream(ctx context.Context) context.Context { return ctx }
+
+func WithLocalHTTPUpstreamOnly(ctx context.Context) context.Context {
 	return context.WithValue(ctx, distributedHTTPUpstreamKey{}, true)
 }
 
 func DistributedHTTPUpstreamEnabled(ctx context.Context) bool {
-	enabled, _ := ctx.Value(distributedHTTPUpstreamKey{}).(bool)
-	return enabled
+	local, _ := ctx.Value(distributedHTTPUpstreamKey{}).(bool)
+	return !local
 }
 
 // MarkDistributedHTTPUpstreamResponse marks responses attempted by the Worker pool,

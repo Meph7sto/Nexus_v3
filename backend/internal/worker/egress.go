@@ -36,29 +36,34 @@ func newTargetPolicy(authorities []string) (targetPolicy, error) {
 		}
 		p.authorities[addr] = struct{}{}
 	}
-	if len(p.authorities) == 0 {
-		return targetPolicy{}, errors.New("WORKER_ALLOWED_TARGETS must contain at least one exact HTTPS authority")
-	}
 	return p, nil
 }
 
 func targetAddress(u *url.URL) (string, bool) {
-	if u == nil || u.Scheme != "https" || u.User != nil || u.Opaque != "" || u.Fragment != "" || strings.HasSuffix(u.Host, ":") {
+	if u == nil || (u.Scheme != "https" && u.Scheme != "http") || u.User != nil || u.Opaque != "" || u.Fragment != "" || strings.HasSuffix(u.Host, ":") {
 		return "", false
 	}
 	host := strings.ToLower(u.Hostname())
-	if !validTargetHost(host) {
+	if !validTargetHost(host) && !privateLiteral(host) {
 		return "", false
 	}
 	port := u.Port()
 	if port == "" {
 		port = "443"
+		if u.Scheme == "http" {
+			port = "80"
+		}
 	}
 	n, err := strconv.Atoi(port)
 	if err != nil || n < 1 || n > 65535 || strconv.Itoa(n) != port {
 		return "", false
 	}
 	return net.JoinHostPort(host, port), true
+}
+
+func privateLiteral(host string) bool {
+	ip, err := netip.ParseAddr(host)
+	return err == nil && ip.Zone() == "" && (ip.IsPrivate() || ip.IsLoopback())
 }
 
 func validTargetHost(host string) bool {
@@ -87,7 +92,7 @@ func (p targetPolicy) allows(u *url.URL) bool {
 		return false
 	}
 	_, allowed := p.authorities[addr]
-	return allowed
+	return allowed || len(p.authorities) == 0 && validTargetHost(strings.ToLower(u.Hostname()))
 }
 
 // Validate the exact authority before opening a SOCKS connection in either mode.
@@ -97,13 +102,14 @@ func (p targetPolicy) dialAddresses(ctx context.Context, network, addr string) (
 		return nil, errors.New("invalid outbound address")
 	}
 	host = strings.ToLower(host)
-	if _, ok := p.authorities[net.JoinHostPort(host, port)]; !ok {
+	_, listed := p.authorities[net.JoinHostPort(host, port)]
+	if !listed && len(p.authorities) != 0 || !validTargetHost(host) && !(listed && privateLiteral(host)) {
 		return nil, errors.New("outbound authority denied")
 	}
 	if ip, err := netip.ParseAddr(host); err == nil {
 		return []string{net.JoinHostPort(ip.Unmap().String(), port)}, nil
 	}
-	if p.proxyDNS {
+	if p.proxyDNS && len(p.authorities) > 0 {
 		return []string{addr}, nil
 	}
 	family := "ip"

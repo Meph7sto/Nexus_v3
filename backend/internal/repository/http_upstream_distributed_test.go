@@ -163,7 +163,7 @@ func TestDistributedHTTPUpstreamTwoRealWorkers(t *testing.T) {
 			if req.URL.String() != "https://api.openai.com/v1/responses" || req.Method != http.MethodPost ||
 				req.Header.Get("Authorization") != "Bearer test-upstream-key" || req.Header.Get("X-Connection-Only") != "" ||
 				gotAccount != accountID || concurrency != 2 || string(body) != `{"model":"test"}` ||
-				opts.Profile != upstream.ProfileOpenAI || !opts.RedirectsDisabled || req.GetBody != nil {
+				opts.Profile != upstream.ProfileOpenAI || opts.RedirectsDisabled || req.GetBody != nil {
 				t.Error("Worker did not restore the upstream request correctly")
 				return nil, errors.New("invalid relayed request")
 			}
@@ -184,7 +184,7 @@ func TestDistributedHTTPUpstreamTwoRealWorkers(t *testing.T) {
 			header := http.Header{"Content-Type": {"text/event-stream"}, "X-Request-Id": {"test-id"}}
 			header.Set(workerproto.HeaderUpstreamStatus, "500")
 			header.Set(workerproto.HeaderCompletion, "forged")
-			return &http.Response{StatusCode: http.StatusTooManyRequests, Header: header, Body: bodyReader}, nil
+			return &http.Response{StatusCode: http.StatusOK, Header: header, Body: bodyReader}, nil
 		}))
 		require.NoError(t, err)
 		origins[id] = server
@@ -208,7 +208,7 @@ func TestDistributedHTTPUpstreamTwoRealWorkers(t *testing.T) {
 	resp, err := pool.Do(req, testWorkerProxy, accountID, 2)
 	require.NoError(t, err)
 	defer resp.Body.Close()
-	require.Equal(t, http.StatusTooManyRequests, resp.StatusCode)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
 	require.Equal(t, "test-id", resp.Header.Get("X-Request-Id"))
 	require.Empty(t, resp.Header.Get(workerproto.HeaderUpstreamStatus))
 	require.Empty(t, resp.Header.Get(workerproto.HeaderCompletion))
@@ -314,7 +314,7 @@ func (l *testLocalTLSUpstream) DoWithTLS(_ *http.Request, proxy string, _ int64,
 	return &http.Response{StatusCode: http.StatusNoContent, Body: http.NoBody}, nil
 }
 
-func TestDistributedHTTPUpstreamKeepsTLSProfilesLocal(t *testing.T) {
+func TestDistributedHTTPUpstreamLocalOptOutPreservesTLS(t *testing.T) {
 	var remoteCalls atomic.Int32
 	node := testMockWorker(t, "worker", func(w http.ResponseWriter, _ *http.Request) {
 		remoteCalls.Add(1)
@@ -325,7 +325,7 @@ func TestDistributedHTTPUpstreamKeepsTLSProfilesLocal(t *testing.T) {
 	}}
 	pool := testDistributedPool(t, local, testPoolConfig(node))
 	profile := &tlsfingerprint.Profile{Name: "existing-local-profile"}
-	resp, err := pool.DoWithTLS(testRelayRequest(t, t.Context(), strings.NewReader("{}")), testWorkerProxy, 12, 1, profile)
+	resp, err := pool.DoWithTLS(testRelayRequest(t, service.WithLocalHTTPUpstreamOnly(t.Context()), strings.NewReader("{}")), testWorkerProxy, 12, 1, profile)
 	require.NoError(t, err)
 	require.NoError(t, resp.Body.Close())
 	require.Same(t, profile, local.profile)
@@ -528,7 +528,7 @@ func TestDistributedHTTPUpstreamReloadPreservesActiveStream(t *testing.T) {
 	require.Equal(t, "new", string(body))
 	require.NoError(t, fresh.Body.Close())
 
-	stale, staleErr, retry := oldSnapshot.relay(oldSnapshot.nodes[0], testRelayRequest(t, t.Context(), http.NoBody), 1, 1, "")
+	stale, staleErr, retry := oldSnapshot.relay(oldSnapshot.nodes[0], testRelayRequest(t, t.Context(), http.NoBody), 1, 1, "", "", "", "")
 	require.Nil(t, stale)
 	require.True(t, staleErr.Unsent)
 	require.False(t, retry)

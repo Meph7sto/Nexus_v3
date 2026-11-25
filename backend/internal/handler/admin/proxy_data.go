@@ -55,7 +55,7 @@ func (h *ProxyHandler) ExportData(c *gin.Context) {
 	dataProxies := make([]DataProxy, 0, len(proxies))
 	for i := range proxies {
 		p := proxies[i]
-		key := buildProxyKey(p.Protocol, p.Host, p.Port, p.Username, p.Password)
+		key := exportProxyKey(p)
 
 		var expiresAt *int64
 		if p.ExpiresAt != nil {
@@ -67,18 +67,17 @@ func (h *ProxyHandler) ExportData(c *gin.Context) {
 			backupProxyName = proxyNameByID[*p.BackupProxyID]
 		}
 		dataProxies = append(dataProxies, DataProxy{
-			ProxyKey:        key,
-			Name:            p.Name,
-			Protocol:        p.Protocol,
-			Host:            p.Host,
-			Port:            p.Port,
-			Username:        p.Username,
-			Password:        p.Password,
-			Status:          p.Status,
-			ExpiresAt:       expiresAt,
-			FallbackMode:    p.FallbackMode,
-			BackupProxyName: backupProxyName,
-			ExpiryWarnDays:  p.ExpiryWarnDays,
+			ProxyKey:            key,
+			Name:                p.Name,
+			Protocol:            p.Protocol,
+			Host:                p.Host,
+			Port:                p.Port,
+			CredentialsRequired: p.Username != "" || p.Password != "",
+			Status:              p.Status,
+			ExpiresAt:           expiresAt,
+			FallbackMode:        p.FallbackMode,
+			BackupProxyName:     backupProxyName,
+			ExpiryWarnDays:      p.ExpiryWarnDays,
 		})
 	}
 
@@ -149,7 +148,7 @@ func (h *ProxyHandler) ImportData(c *gin.Context) {
 		}
 
 		normalizedStatus := normalizeProxyStatus(item.Status)
-		if existing, ok := proxyByKey[key]; ok {
+		if existing, ok := proxyByKey[buildProxyKey(item.Protocol, item.Host, item.Port, item.Username, item.Password)]; ok {
 			result.ProxyReused++
 			if normalizedStatus != "" && normalizedStatus != existing.Status {
 				// 已存在代理同步 status 时，同时保留/覆盖导入 item 的完整字段，

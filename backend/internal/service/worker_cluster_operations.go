@@ -297,7 +297,7 @@ func (s *WorkerClusterService) JoinTemplate(ctx context.Context, nodeID string) 
 	if _, err := s.resolveWorker(node); err != nil {
 		return "", err
 	}
-	return fmt.Sprintf("# Provision WORKER_ENV_FILE, WORKER_SECRETS_DIR and private WORKER_BIND_IP separately.\n"+
+	return fmt.Sprintf("# Provision WORKER_ENV_FILE, WORKER_SECRETS_DIR and private WORKER_BIND_IP separately. Account routes come from Entry.\n"+
 		"WORKER_NODE_ID='%s' docker compose -f deploy/worker/compose.yaml up -d --build worker", node.NodeID), nil
 }
 

@@ -1,6 +1,7 @@
 package repository
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -12,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	pkghttputil "github.com/Wei-Shaw/sub2api/internal/pkg/httputil"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/servertiming"
@@ -27,18 +29,62 @@ var (
 )
 
 func (s *DistributedHTTPUpstream) Do(req *http.Request, proxyURL string, accountID int64, accountConcurrency int) (*http.Response, error) {
-	snapshot := s.current.Load()
-	if snapshot == nil || !workerEligibleRequest(req, accountID, accountConcurrency) {
-		return s.local.Do(req, proxyURL, accountID, accountConcurrency)
-	}
-	proxy, ok := workerProxyKey(proxyURL)
-	if !ok || proxy != snapshot.defaultProxy {
-		return s.local.Do(req, proxyURL, accountID, accountConcurrency)
-	}
+	return s.route(req, proxyURL, accountID, accountConcurrency, nil)
+}
 
+func (s *DistributedHTTPUpstream) DoWithTLS(req *http.Request, proxyURL string, accountID int64, accountConcurrency int, profile *tlsfingerprint.Profile) (*http.Response, error) {
+	return s.route(req, proxyURL, accountID, accountConcurrency, profile)
+}
+
+func (s *DistributedHTTPUpstream) route(req *http.Request, proxyURL string, accountID int64, accountConcurrency int, profile *tlsfingerprint.Profile) (*http.Response, error) {
+	local := func(r *http.Request) (*http.Response, error) {
+		if profile != nil {
+			return s.local.DoWithTLS(r, proxyURL, accountID, accountConcurrency, profile)
+		}
+		return s.local.Do(r, proxyURL, accountID, accountConcurrency)
+	}
+	snapshot := s.current.Load()
+	if snapshot == nil || req != nil && !service.DistributedHTTPUpstreamEnabled(req.Context()) {
+		return local(req)
+	}
+	if req == nil || req.URL == nil || req.Host != "" && !strings.EqualFold(req.Host, req.URL.Host) {
+		return nil, relayFailure(service.HTTPUpstreamRelayWorker, true, errors.New("invalid upstream request"))
+	}
+	timeout := ""
+	if localTransport, ok := s.local.(interface {
+		workerResponseHeaderTimeout(*http.Request) time.Duration
+	}); ok {
+		timeout = localTransport.workerResponseHeaderTimeout(req).String()
+	}
+	if strings.EqualFold(req.URL.Hostname(), grokCLIProxyHost) {
+		req = req.Clone(req.Context())
+		applyGrokCLIProxyHeaders(req)
+		return (&grokAccessDeniedFallbackTransport{base: relayRoundTrip(func(r *http.Request) (*http.Response, error) {
+			return snapshot.forward(r, proxyURL, accountID, accountConcurrency, profile, timeout, local)
+		})}).RoundTrip(req)
+	}
+	return snapshot.forward(req, proxyURL, accountID, accountConcurrency, profile, timeout, local)
+}
+
+type relayRoundTrip func(*http.Request) (*http.Response, error)
+
+func (rt relayRoundTrip) RoundTrip(r *http.Request) (*http.Response, error) { return rt(r) }
+
+func (snapshot *workerSnapshot) forward(req *http.Request, proxyURL string, accountID int64, accountConcurrency int, profile *tlsfingerprint.Profile, timeout string, local relayRoundTrip) (*http.Response, error) {
 	meta, err := workerproto.EncodeJSON(workerproto.EndToEndHeaders(req.Header))
 	if err != nil {
 		return nil, relayFailure(service.HTTPUpstreamRelayWorker, true, err)
+	}
+	proxy, err := workerproto.EncodeProxy(proxyURL)
+	if err != nil {
+		return nil, relayFailure(service.HTTPUpstreamRelayWorker, true, err)
+	}
+	tlsMeta := ""
+	if profile != nil {
+		tlsMeta, err = workerproto.EncodeJSON(profile)
+		if err != nil {
+			return nil, relayFailure(service.HTTPUpstreamRelayWorker, true, err)
+		}
 	}
 	attempted := make(map[*relayWorker]bool)
 	lastErr := relayFailure(service.HTTPUpstreamRelayWorker, true, errNoHealthyWorker)
@@ -55,7 +101,7 @@ func (s *DistributedHTTPUpstream) Do(req *http.Request, proxyURL string, account
 			return nil, lastErr
 		}
 		attempted[node] = true
-		resp, relayErr, retry := snapshot.relay(node, attempt, accountID, accountConcurrency, meta)
+		resp, relayErr, retry := snapshot.relay(node, attempt, accountID, accountConcurrency, meta, proxy, tlsMeta, timeout)
 		if relayErr == nil {
 			return resp, nil
 		}
@@ -77,8 +123,7 @@ func (s *DistributedHTTPUpstream) Do(req *http.Request, proxyURL string, account
 		}
 		return nil, lastErr
 	}
-	// Eligibility already matched this exact configured SOCKS5 route.
-	resp, err := s.local.Do(attempt, proxyURL, accountID, accountConcurrency)
+	resp, err := local(attempt.WithContext(context.WithValue(attempt.Context(), grokRelayHandledKey{}, true)))
 	if err != nil {
 		relayErr := relayFailure(service.HTTPUpstreamRelayUpstream, false, err)
 		relayErr.LocalFallback = true
@@ -88,24 +133,6 @@ func (s *DistributedHTTPUpstream) Do(req *http.Request, proxyURL string, account
 		service.MarkDistributedHTTPUpstreamResponse(resp, req)
 	}
 	return resp, nil
-}
-
-func (s *DistributedHTTPUpstream) DoWithTLS(req *http.Request, proxyURL string, accountID int64, accountConcurrency int, profile *tlsfingerprint.Profile) (*http.Response, error) {
-	if profile != nil {
-		return s.local.DoWithTLS(req, proxyURL, accountID, accountConcurrency, profile)
-	}
-	return s.Do(req, proxyURL, accountID, accountConcurrency)
-}
-
-func workerEligibleRequest(req *http.Request, accountID int64, accountConcurrency int) bool {
-	return req != nil && req.URL != nil && accountID > 0 && accountConcurrency >= 0 &&
-		service.DistributedHTTPUpstreamEnabled(req.Context()) &&
-		service.HTTPUpstreamProfileFromContext(req.Context()) == service.HTTPUpstreamProfileOpenAI &&
-		req.Method == http.MethodPost && req.URL.Scheme == "https" &&
-		strings.EqualFold(req.URL.Host, "api.openai.com") &&
-		req.URL.EscapedPath() == "/v1/responses" && req.URL.User == nil && req.URL.Opaque == "" &&
-		req.URL.RawQuery == "" && !req.URL.ForceQuery && req.URL.Fragment == "" &&
-		(req.Host == "" || strings.EqualFold(req.Host, req.URL.Host))
 }
 
 func workerRequestReplayable(req *http.Request) bool {
@@ -128,7 +155,7 @@ func replayWorkerRequest(req *http.Request, previouslyAttempted bool) (*http.Req
 	return clone, nil
 }
 
-func (s *workerSnapshot) relay(node *relayWorker, req *http.Request, accountID int64, accountConcurrency int, meta string) (*http.Response, *service.HTTPUpstreamRelayError, bool) {
+func (s *workerSnapshot) relay(node *relayWorker, req *http.Request, accountID int64, accountConcurrency int, meta, proxy, tlsMeta, timeout string) (*http.Response, *service.HTTPUpstreamRelayError, bool) {
 	ctx, cancel := pkghttputil.NewUpstreamAttemptContext(req.Context(), s.drainTimeout)
 	var gotConnection atomic.Bool
 	ctx = httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{
@@ -148,15 +175,24 @@ func (s *workerSnapshot) relay(node *relayWorker, req *http.Request, accountID i
 		return nil, relayFailure(service.HTTPUpstreamRelayWorker, true, errInvalidRelayReply), false
 	}
 	outgoing.ContentLength = req.ContentLength
+	if req.Body == nil || req.Body == http.NoBody {
+		outgoing.Body = http.NoBody
+	}
 	outgoing.Header.Set("Authorization", "Bearer "+node.token)
 	outgoing.Header.Set(workerproto.HeaderMethod, req.Method)
 	outgoing.Header.Set(workerproto.HeaderTargetURL, req.URL.String())
-	outgoing.Header.Set(workerproto.HeaderProxyID, workerproto.DefaultProxyID)
+	outgoing.Header.Set(workerproto.HeaderProxy, proxy)
+	if tlsMeta != "" {
+		outgoing.Header.Set(workerproto.HeaderTLSProfile, tlsMeta)
+	}
 	outgoing.Header.Set(workerproto.HeaderAccountID, strconv.FormatInt(accountID, 10))
 	outgoing.Header.Set(workerproto.HeaderAccountConcurrency, strconv.Itoa(accountConcurrency))
-	outgoing.Header.Set(workerproto.HeaderUpstreamProfile, string(service.HTTPUpstreamProfileOpenAI))
-	outgoing.Header.Set(workerproto.HeaderRedirectsDisabled, "true")
-	outgoing.Header.Set(workerproto.HeaderPublicHostsOnly, "true")
+	outgoing.Header.Set(workerproto.HeaderUpstreamProfile, string(service.HTTPUpstreamProfileFromContext(req.Context())))
+	if timeout != "" {
+		outgoing.Header.Set(workerproto.HeaderResponseHeaderTimeout, timeout)
+	}
+	outgoing.Header.Set(workerproto.HeaderRedirectsDisabled, strconv.FormatBool(service.HTTPUpstreamRedirectsDisabled(req.Context())))
+	outgoing.Header.Set(workerproto.HeaderPublicHostsOnly, strconv.FormatBool(service.HTTPUpstreamPublicHostsOnly(req.Context())))
 	outgoing.Header.Set(workerproto.HeaderUpstreamHeaders, meta)
 
 	node.localLoad.Add(1)
@@ -216,6 +252,17 @@ func (s *workerSnapshot) relay(node *relayWorker, req *http.Request, accountID i
 		},
 	}
 	service.MarkDistributedHTTPUpstreamResponse(resp, req)
+	// Gate account-changing error handling on a complete error envelope. Many
+	// channel adapters inspect just the status or a prefix of the error body.
+	if status >= 400 {
+		const limit = 2 << 20
+		data, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
+		_ = resp.Body.Close()
+		if err != nil || len(data) > limit {
+			return nil, relayFailure(service.HTTPUpstreamRelayLink, false, errIncompleteRelay), false
+		}
+		resp.Body = io.NopCloser(bytes.NewReader(data))
+	}
 	return resp, nil, false
 }
 

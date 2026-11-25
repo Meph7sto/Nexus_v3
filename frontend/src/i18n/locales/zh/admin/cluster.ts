@@ -48,6 +48,7 @@ export default {
     inFlight: '在途请求',
     roundTrip: '往返时延',
     join: '接入模板',
+    joinRoutes: '代理和渠道在 Entry 管理台配置。Worker 只需配置节点身份和认证。',
     remove: '移除 Worker',
     removeRequest: '从 Worker 池移除 {name}？',
     binding: '运维授权绑定',

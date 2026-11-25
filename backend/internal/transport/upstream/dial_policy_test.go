@@ -64,6 +64,33 @@ func TestControlledDialLimitsConnectionsAcrossTransports(t *testing.T) {
 	require.NoError(t, conn.Close())
 }
 
+func TestControlledDialReclaimsIdleSocketForNewProxy(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, "ok")
+	}))
+	t.Cleanup(server.Close)
+	proxy1, calls1 := startTestSOCKS5Proxy(t)
+	proxy2, calls2 := startTestSOCKS5Proxy(t)
+	client := NewClient(&Config{
+		ConnectionPoolIsolation: ConnectionPoolIsolationAccountProxy,
+		MaxConnections:          1, MaxUpstreamClients: 2,
+		DialAddresses: func(_ context.Context, _, addr string) ([]string, error) { return []string{addr}, nil },
+	})
+	for _, proxy := range []string{proxy1, proxy2, proxy1, proxy2} {
+		req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, server.URL, nil)
+		require.NoError(t, err)
+		resp, err := client.Do(req, proxy, 1, 1, RequestOptions{})
+		require.NoError(t, err)
+		_, err = io.ReadAll(resp.Body)
+		require.NoError(t, err)
+		require.NoError(t, resp.Body.Close())
+		require.LessOrEqual(t, len(client.connections), 1)
+		require.LessOrEqual(t, len(client.clients), 2)
+	}
+	require.EqualValues(t, 2, calls1.Load())
+	require.EqualValues(t, 2, calls2.Load())
+}
+
 func TestControlledDialTrustedDNSRequiresSOCKSAndSendsExactName(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(204) }))
 	t.Cleanup(server.Close)

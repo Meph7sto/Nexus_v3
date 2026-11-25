@@ -48,6 +48,7 @@ export default {
     inFlight: 'In flight',
     roundTrip: 'Round trip',
     join: 'Deployment template',
+    joinRoutes: 'Manage proxies and channels in Entry. Configure only the node identity and authentication on the Worker.',
     remove: 'Remove Worker',
     removeRequest: 'Remove {name} from the Worker pool?',
     binding: 'Approved binding',

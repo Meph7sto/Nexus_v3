@@ -2,6 +2,10 @@ package service
 
 import "net/http"
 
+func (s *OpenAIGatewayService) SetWorkerTLSProfiles(profiles *TLSFingerprintProfileService) {
+	s.workerTLSProfiles = profiles
+}
+
 func (s *OpenAIGatewayService) SetPluginManager(manager *PluginManager) {
 	s.pluginManager = manager
 }
@@ -14,6 +18,9 @@ func (s *OpenAIGatewayService) doOpenAIUpstream(request *http.Request, proxyURL 
 		if handled {
 			return response, err
 		}
+	}
+	if p, ok := s.httpUpstream.(workerWebSocketProvider); ok && p.WorkerWebSocketRoute() != nil && s.workerTLSProfiles != nil && account.IsTLSFingerprintEnabled() {
+		return s.httpUpstream.DoWithTLS(request, proxyURL, account.ID, account.Concurrency, s.workerTLSProfiles.ResolveTLSProfile(account))
 	}
 	return s.httpUpstream.Do(request, proxyURL, account.ID, account.Concurrency)
 }

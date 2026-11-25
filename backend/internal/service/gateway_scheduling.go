@@ -1574,6 +1574,11 @@ func (s *GatewayService) isAccountBlockedBySchedulingThreshold(ctx context.Conte
 }
 
 func (s *GatewayService) hydrateSelectedAccount(ctx context.Context, account *Account) (*Account, error) {
+	if account != nil {
+		if a, ok, err := loadWorkerAccount(ctx, s.httpUpstream, s.accountRepo, account.ID); ok {
+			return a, err
+		}
+	}
 	if account == nil || s.schedulerSnapshot == nil {
 		return account, nil
 	}

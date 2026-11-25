@@ -138,6 +138,7 @@ func ProvideGatewayHandler(
 func ProvideOpenAIGatewayHandler(
 	gatewayService *service.OpenAIGatewayService,
 	pluginManager *service.PluginManager,
+	workerTLSProfiles *service.TLSFingerprintProfileService,
 	concurrencyService *service.ConcurrencyService,
 	billingCacheService *service.BillingCacheService,
 	apiKeyService *service.APIKeyService,
@@ -153,6 +154,7 @@ func ProvideOpenAIGatewayHandler(
 ) *OpenAIGatewayHandler {
 	gatewayService.SetUsageInteractionService(usageInteractionService)
 	gatewayService.SetPluginManager(pluginManager)
+	gatewayService.SetWorkerTLSProfiles(workerTLSProfiles)
 	h := NewOpenAIGatewayHandler(gatewayService, concurrencyService, billingCacheService, apiKeyService,
 		usageRecordWorkerPool, errorPassthroughService, contentModerationService, opsService, cfg)
 	h.compositeResolver = compositeResolver

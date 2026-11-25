@@ -5,7 +5,9 @@ import (
 	"compress/flate"
 	"compress/gzip"
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -108,6 +110,8 @@ type RequestOptions struct {
 	Profile           Profile
 	RedirectsDisabled bool
 	PublicHostsOnly   bool
+	// ResponseHeaderTimeout overrides the configured profile timeout when non-nil.
+	ResponseHeaderTimeout *time.Duration
 	// WrapTransport allows the caller to apply provider-specific behavior to
 	// the pooled transport without changing the pool itself.
 	WrapTransport func(http.RoundTripper) http.RoundTripper
@@ -211,7 +215,7 @@ func (s *Client) Do(req *http.Request, proxyURL string, accountID int64, account
 	profile := opts.Profile
 
 	// 获取或创建对应的客户端，并标记请求占用
-	entry, err := s.acquireClientWithProfile(proxyURL, accountID, accountConcurrency, profile)
+	entry, err := s.getClientEntry(proxyURL, accountID, accountConcurrency, profile, true, true, opts.ResponseHeaderTimeout)
 	if err != nil {
 		return nil, err
 	}
@@ -246,9 +250,6 @@ func (s *Client) DoWithTLS(req *http.Request, proxyURL string, accountID int64, 
 	if profile == nil {
 		return s.Do(req, proxyURL, accountID, accountConcurrency, opts)
 	}
-	if s.cfg != nil && (s.cfg.DialAddresses != nil || s.cfg.ProxyDNS || s.connections != nil) {
-		return nil, errors.New("TLS profiles are not supported with a controlled dial policy")
-	}
 	// Plain HTTP has no TLS handshake to fingerprint. Reuse the normal transport
 	// so a configured HTTP or SOCKS proxy is not bypassed.
 	if req != nil && req.URL != nil && strings.EqualFold(req.URL.Scheme, "http") {
@@ -265,7 +266,7 @@ func (s *Client) DoWithTLS(req *http.Request, proxyURL string, accountID int64, 
 		return nil, err
 	}
 
-	entry, err := s.acquireClientWithTLS(proxyURL, accountID, accountConcurrency, profile, opts.Profile)
+	entry, err := s.getClientEntryWithTLS(proxyURL, accountID, accountConcurrency, profile, opts.Profile, true, true, opts.ResponseHeaderTimeout)
 	if err != nil {
 		slog.Debug("tls_fingerprint_acquire_client_failed", "account_id", accountID, "error_type", fmt.Sprintf("%T", err))
 		return nil, err
@@ -382,24 +383,23 @@ func (s *Client) httpClientForUpstreamRequest(client *http.Client, opts RequestO
 	return &clone
 }
 
-// acquireClientWithTLS 获取或创建带 TLS 指纹的客户端
-func (s *Client) acquireClientWithTLS(proxyURL string, accountID int64, accountConcurrency int, profile *tlsfingerprint.Profile, upstreamProfile Profile) (*upstreamClientEntry, error) {
-	return s.getClientEntryWithTLS(proxyURL, accountID, accountConcurrency, profile, upstreamProfile, true, true)
-}
-
 // getClientEntryWithTLS 获取或创建带 TLS 指纹的客户端条目
 // TLS 指纹客户端使用独立的缓存键，与普通客户端隔离
-func (s *Client) getClientEntryWithTLS(proxyURL string, accountID int64, accountConcurrency int, profile *tlsfingerprint.Profile, upstreamProfile Profile, markInFlight bool, enforceLimit bool) (*upstreamClientEntry, error) {
+func (s *Client) getClientEntryWithTLS(proxyURL string, accountID int64, accountConcurrency int, profile *tlsfingerprint.Profile, upstreamProfile Profile, markInFlight bool, enforceLimit bool, headerTimeout ...*time.Duration) (*upstreamClientEntry, error) {
 	isolation := s.getIsolationMode()
 	proxyKey, parsedProxy, err := normalizeProxyURL(proxyURL)
 	if err != nil {
 		return nil, err
 	}
 	settings := s.resolvePoolSettings(isolation, accountConcurrency)
-	settings = s.applyProfilePoolSettings(settings, upstreamProfile)
+	settings = s.applyProfilePoolSettings(settings, upstreamProfile, headerTimeout...)
 	// TLS 指纹客户端使用独立的缓存键，加 "tls:" 前缀
 	cacheKey := "tls:" + buildCacheKey(isolation, proxyKey, accountID, upstreamProtocolModeDefault)
 	poolKey := buildPoolKey(settings, upstreamProtocolModeDefault) + ":tls"
+	if s.cfg != nil && s.cfg.DialAddresses != nil {
+		data, _ := json.Marshal(profile)
+		cacheKey += fmt.Sprintf(":%x", sha256.Sum256(data))
+	}
 
 	now := time.Now()
 	nowUnix := now.UnixNano()
@@ -449,7 +449,18 @@ func (s *Client) getClientEntryWithTLS(proxyURL string, accountID int64, account
 
 	// 创建带 TLS 指纹的 Transport
 	slog.Debug("tls_fingerprint_creating_new_client", "account_id", accountID)
-	transport, err := buildUpstreamTransportWithTLSFingerprint(settings, parsedProxy, profile)
+	var transport *http.Transport
+	if s.cfg != nil && (s.cfg.DialAddresses != nil || s.connections != nil || s.cfg.ProxyDNS) {
+		transport, err = buildUpstreamTransport(settings, parsedProxy, upstreamProtocolModeDefault)
+		if err == nil {
+			err = s.configureRoute(transport, parsedProxy)
+		}
+		if err == nil {
+			setControlledTLSProfile(transport, profile)
+		}
+	} else {
+		transport, err = buildUpstreamTransportWithTLSFingerprint(settings, parsedProxy, profile)
+	}
 	if err != nil {
 		s.mu.Unlock()
 		return nil, fmt.Errorf("build TLS fingerprint transport: %w", err)
@@ -543,7 +554,7 @@ func (s *Client) getOrCreateClient(proxyURL string, accountID int64, accountConc
 // getClientEntry 获取或创建客户端条目
 // markInFlight=true 时会标记进行中请求，用于请求路径防止被淘汰
 // enforceLimit=true 时会限制客户端数量，超限且无法淘汰时返回错误
-func (s *Client) getClientEntry(proxyURL string, accountID int64, accountConcurrency int, profile Profile, markInFlight bool, enforceLimit bool) (*upstreamClientEntry, error) {
+func (s *Client) getClientEntry(proxyURL string, accountID int64, accountConcurrency int, profile Profile, markInFlight bool, enforceLimit bool, headerTimeout ...*time.Duration) (*upstreamClientEntry, error) {
 	// 获取隔离模式
 	isolation := s.getIsolationMode()
 	// 标准化代理 URL 并解析
@@ -554,7 +565,7 @@ func (s *Client) getClientEntry(proxyURL string, accountID int64, accountConcurr
 	// 根据请求 profile（例如 OpenAI）选择协议模式
 	protocolMode := s.resolveProtocolMode(profile, proxyKey, parsedProxy)
 	settings := s.resolvePoolSettings(isolation, accountConcurrency)
-	settings = s.applyProfilePoolSettings(settings, profile)
+	settings = s.applyProfilePoolSettings(settings, profile, headerTimeout...)
 	// 构建缓存键（根据隔离策略不同）
 	cacheKey := buildCacheKey(isolation, proxyKey, accountID, protocolMode)
 	// 构建连接池配置键（用于检测配置变更）
@@ -606,7 +617,7 @@ func (s *Client) getClientEntry(proxyURL string, accountID int64, accountConcurr
 		s.mu.Unlock()
 		return nil, fmt.Errorf("build transport: %w", err)
 	}
-	if err := s.configureDialPolicy(transport, parsedProxy != nil && parsedProxy.Scheme == "socks5h"); err != nil {
+	if err := s.configureRoute(transport, parsedProxy); err != nil {
 		s.mu.Unlock()
 		return nil, err
 	}
@@ -802,7 +813,15 @@ func (s *Client) resolvePoolSettings(isolation string, accountConcurrency int) p
 	return settings
 }
 
-func (s *Client) applyProfilePoolSettings(settings poolSettings, profile Profile) poolSettings {
+func (s *Client) ResponseHeaderTimeout(profile Profile) time.Duration {
+	return s.applyProfilePoolSettings(defaultPoolSettings(s.cfg), profile).responseHeaderTimeout
+}
+
+func (s *Client) applyProfilePoolSettings(settings poolSettings, profile Profile, override ...*time.Duration) poolSettings {
+	if len(override) > 0 && override[0] != nil {
+		settings.responseHeaderTimeout = *override[0]
+		return settings
+	}
 	switch profile {
 	case ProfileOpenAI:
 		settings.responseHeaderTimeout = 0

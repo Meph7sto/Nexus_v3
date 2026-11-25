@@ -10,28 +10,44 @@ import (
 )
 
 const (
-	HealthPath = "/healthz"
-	RelayPath  = "/_nexus_worker/v1/relay"
-	DrainPath  = "/_nexus_worker/v1/drain"
+	HealthPath  = "/healthz"
+	RelayPath   = "/_nexus_worker/v1/relay"
+	WSRelayPath = "/_nexus_worker/v1/ws-relay"
+	DrainPath   = "/_nexus_worker/v1/drain"
 
-	HeaderPrefix             = "X-Nexus-Relay-"
-	HeaderTargetURL          = HeaderPrefix + "Target-URL"
-	HeaderMethod             = HeaderPrefix + "Method"
-	HeaderProxyID            = HeaderPrefix + "Proxy-ID"
-	HeaderAccountID          = HeaderPrefix + "Account-ID"
-	HeaderAccountConcurrency = HeaderPrefix + "Account-Concurrency"
-	HeaderUpstreamProfile    = HeaderPrefix + "Upstream-Profile"
-	HeaderTLSProfile         = HeaderPrefix + "TLS-Profile"
-	HeaderRedirectsDisabled  = HeaderPrefix + "Redirects-Disabled"
-	HeaderPublicHostsOnly    = HeaderPrefix + "Public-Hosts-Only"
-	HeaderUpstreamHeaders    = HeaderPrefix + "Upstream-Headers"
-	HeaderUpstreamStatus     = HeaderPrefix + "Upstream-Status"
-	HeaderCompletion         = HeaderPrefix + "Completion"
+	HeaderPrefix                = "X-Nexus-Relay-"
+	HeaderTargetURL             = HeaderPrefix + "Target-URL"
+	HeaderMethod                = HeaderPrefix + "Method"
+	HeaderProxyID               = HeaderPrefix + "Proxy-ID"
+	HeaderProxy                 = HeaderPrefix + "Proxy"
+	HeaderAccountID             = HeaderPrefix + "Account-ID"
+	HeaderAccountConcurrency    = HeaderPrefix + "Account-Concurrency"
+	HeaderUpstreamProfile       = HeaderPrefix + "Upstream-Profile"
+	HeaderTLSProfile            = HeaderPrefix + "TLS-Profile"
+	HeaderResponseHeaderTimeout = HeaderPrefix + "Response-Header-Timeout"
+	HeaderRedirectsDisabled     = HeaderPrefix + "Redirects-Disabled"
+	HeaderPublicHostsOnly       = HeaderPrefix + "Public-Hosts-Only"
+	HeaderUpstreamHeaders       = HeaderPrefix + "Upstream-Headers"
+	HeaderUpstreamStatus        = HeaderPrefix + "Upstream-Status"
+	HeaderCompletion            = HeaderPrefix + "Completion"
 
 	DefaultProxyID     = "default"
 	CompletionComplete = "complete"
 	MaxEncodedJSON     = 32 << 10
 )
+
+type ProxySpec struct {
+	Mode string `json:"mode"`
+	URL  string `json:"url,omitempty"`
+}
+
+func EncodeProxy(raw string) (string, error) {
+	spec := ProxySpec{Mode: "direct"}
+	if raw != "" {
+		spec = ProxySpec{Mode: "url", URL: raw}
+	}
+	return EncodeJSON(spec)
+}
 
 type ErrorCode string
 

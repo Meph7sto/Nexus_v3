@@ -80,6 +80,9 @@ func (e *openAIWSFallbackError) Unwrap() error {
 }
 
 func wrapOpenAIWSFallback(reason string, err error) error {
+	if IsHTTPUpstreamRelayTerminal(err) {
+		return err
+	}
 	return &openAIWSFallbackError{Reason: strings.TrimSpace(reason), Err: err}
 }
 
@@ -116,6 +119,9 @@ func (e *openAIWSCurrentTurnFailoverError) Unwrap() error {
 }
 
 func newOpenAIWSCurrentTurnFailoverError(cause error, retryPayload []byte) error {
+	if IsHTTPUpstreamRelayTerminal(cause) {
+		return cause
+	}
 	return &openAIWSCurrentTurnFailoverError{
 		cause:        cause,
 		retryPayload: append([]byte(nil), retryPayload...),
@@ -161,6 +167,9 @@ func wrapOpenAIWSIngressTurnError(stage string, cause error, wroteDownstream boo
 }
 
 func isOpenAIWSIngressTurnRetryable(err error) bool {
+	if IsHTTPUpstreamRelayTerminal(err) {
+		return false
+	}
 	var turnErr *openAIWSIngressTurnError
 	if !errors.As(err, &turnErr) || turnErr == nil {
 		return false
@@ -275,7 +284,7 @@ func (s *OpenAIGatewayService) getOpenAIWSConnPool() *openAIWSConnPool {
 	}
 	s.openaiWSPoolOnce.Do(func() {
 		if s.openaiWSPool == nil {
-			s.openaiWSPool = newOpenAIWSConnPool(s.cfg)
+			s.openaiWSPool = newOpenAIWSConnPoolWithDialer(s.cfg, openAIWSDialerFor(s.httpUpstream))
 		}
 	})
 	return s.openaiWSPool
@@ -287,7 +296,7 @@ func (s *OpenAIGatewayService) getOpenAIWSPassthroughDialer() openAIWSClientDial
 	}
 	s.openaiWSPassthroughDialerOnce.Do(func() {
 		if s.openaiWSPassthroughDialer == nil {
-			s.openaiWSPassthroughDialer = newDefaultOpenAIWSClientDialer()
+			s.openaiWSPassthroughDialer = openAIWSDialerFor(s.httpUpstream)
 		}
 	})
 	return s.openaiWSPassthroughDialer

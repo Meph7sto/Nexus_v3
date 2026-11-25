@@ -2,7 +2,7 @@
 # Use the private Worker DNS names on the mTLS server certificates.
 worker_pool:
   enabled: false
-  # Set WORKER_POOL_DEFAULT_PROXY_URL in the private Entry environment file.
+  # Entry sends the selected account route with each request.
   fallback_local: false
   allow_private_h2c: false
   tls_ca_file: /run/nexus-worker-secrets/worker-ca.pem

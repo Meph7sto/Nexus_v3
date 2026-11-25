@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -42,12 +43,8 @@ func (s *Client) configureDialPolicy(transport *http.Transport, socks bool) erro
 				}
 			}
 		}
-		if s.connections != nil {
-			select {
-			case s.connections <- struct{}{}:
-			default:
-				return nil, errors.New("upstream connection limit reached")
-			}
+		if s.connections != nil && !s.acquireConnectionSlot() {
+			return nil, errors.New("upstream connection limit reached")
 		}
 		var err error
 		for i, target := range targets {
@@ -77,6 +74,29 @@ func (s *Client) configureDialPolicy(transport *http.Transport, socks bool) erro
 		return nil, err
 	}
 	return nil
+}
+
+// A new account or proxy must not wait for a pool of inactive sockets to age out.
+func (s *Client) acquireConnectionSlot() bool {
+	select {
+	case s.connections <- struct{}{}:
+		return true
+	default:
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, entry := range s.clients {
+		if atomic.LoadInt64(&entry.inFlight) != 0 {
+			continue
+		}
+		entry.client.CloseIdleConnections()
+		select {
+		case s.connections <- struct{}{}:
+			return true
+		default:
+		}
+	}
+	return false
 }
 
 type limitedConn struct {

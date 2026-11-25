@@ -1,4 +1,4 @@
-# Phase 1 private pilot
+# Nexus V3 private Worker network
 
 Start with one Entry, one [Data host](../data/single/compose.yaml), and two [Workers](../worker/compose.yaml). Run each template from its role directory with `docker compose up -d`; add `--build` for Entry and Worker when building from source. Give each Worker a distinct node ID and a distinct Worker token.
 
@@ -11,13 +11,13 @@ Start with one Entry, one [Data host](../data/single/compose.yaml), and two [Wor
 
 ## Entry setup and cutover
 
-The Worker environment defaults to `WORKER_DNS_MODE=local`: it checks every DNS answer, rejects mixed public/private answers, and tries validated addresses through SOCKS before sending any HTTP data. When only the egress proxy has DNS, set `WORKER_DNS_MODE=trusted_proxy` **only** on Workers whose proxy enforces both the exact host/port allowlist and a post-resolution public-IP policy for every connection (including rebinding). Verify that policy before enabling this mode. A generic SOCKS server that allows arbitrary destinations is not suitable. There is no automatic switch between modes.
+Dynamic routes use the Worker resolver to check destination addresses, including through SOCKS5H or HTTP CONNECT. Private destinations are denied by default; explicitly allowlist private IP literals only for known self-hosted origins. Requests marked public-only cannot use that exception. `WORKER_DNS_MODE=trusted_proxy` applies only to legacy relay requests with a configured static SOCKS5H proxy and a target allowlist.
 
 Start [Entry](../entry/compose.yaml) with the existing standalone setup environment variables for the private Postgres and Redis endpoints. Use the existing first-run wizard or set `AUTO_SETUP=true` with explicit admin, JWT and TOTP settings. Keep the initialized `config.yaml` in the Entry data directory.
 
-Set `WORKER_POOL_DEFAULT_PROXY_URL` in Entry's private environment file and `WORKER_PROXY_URL` on each Worker to the same authorized SOCKS5 endpoint. The proxy must also enforce the allowed upstream host and port; permit only `api.openai.com:443` for the pilot. The account must already use this proxy. A missing or different proxy remains local, and local fallback never changes the route to direct egress.
+Manage account proxies and credentials only in Entry. Each relay carries the current account route, including direct egress. No Worker restart is needed. `WORKER_ALLOWED_TARGETS` optionally restricts destination authorities. `WORKER_ALLOW_PRIVATE_PROXY=false` limits the proxy itself to public addresses; it does not relax destination checks. Proxy exports omit usernames and passwords; supply those separately when importing a proxy that needs authentication.
 
-Merge the [Worker pool example](../entry/worker-pool.example.yaml) into Entry's `config.yaml`. Enable it only after configuring both Workers; apply static config changes by restarting Entry. The pilot covers normal native OpenAI API-key HTTP and SSE POSTs to `/v1/responses` on `api.openai.com`. Passthrough, custom base URLs, images, converted routes, probes, plugins, WebSockets, TLS fingerprint profiles and special proxy fallback policies remain local.
+Merge the [Worker pool example](../entry/worker-pool.example.yaml) into the Entry configuration. Enable the pool after provisioning authenticated Workers. HTTP/SSE and native OpenAI WebSocket handshakes use the pool. Disabling the pool restores local transport for new requests.
 
 Entry probes Workers using the authenticated HTTP/2 `/healthz` endpoint. Do not log or paste the credentials when checking a node. To drain a Worker, send SIGTERM (for example via `docker compose stop worker`); the process rejects new relay requests and lets in-flight streams finish until `WORKER_DRAIN_TIMEOUT`. Keep `WORKER_STOP_GRACE_PERIOD` longer than the drain timeout. For token rotation, mount the prior token and set `WORKER_PREVIOUS_SHARED_TOKEN_FILE` during the overlap; remove it once Entry has restarted with the new token.
 

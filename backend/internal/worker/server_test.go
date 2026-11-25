@@ -76,7 +76,8 @@ func relayRequest(t *testing.T, base string, body io.Reader) *http.Request {
 	r.Header.Set("Authorization", "Bearer "+testToken)
 	r.Header.Set(workerproto.HeaderTargetURL, testTarget)
 	r.Header.Set(workerproto.HeaderMethod, http.MethodPost)
-	r.Header.Set(workerproto.HeaderProxyID, workerproto.DefaultProxyID)
+	proxy, _ := workerproto.EncodeProxy("")
+	r.Header.Set(workerproto.HeaderProxy, proxy)
 	r.Header.Set(workerproto.HeaderAccountID, "17")
 	r.Header.Set(workerproto.HeaderAccountConcurrency, "3")
 	r.Header.Set(workerproto.HeaderUpstreamProfile, string(upstream.ProfileOpenAI))
@@ -107,7 +108,7 @@ func TestRelayStreamsUploadAndResponseThroughDrain(t *testing.T) {
 
 	check := func(req *http.Request, proxy string, id int64, concurrency int, opts upstream.RequestOptions) error {
 		if req.URL.String() != testTarget || req.Method != http.MethodPost || req.Host != "api.example.com" ||
-			id != 17 || concurrency != 3 || opts.Profile != upstream.ProfileOpenAI || !opts.RedirectsDisabled || req.GetBody != nil {
+			id != 17 || concurrency != 3 || opts.Profile != upstream.ProfileOpenAI || opts.RedirectsDisabled || req.GetBody != nil {
 			return errors.New("relay changed the target, request policy, or account")
 		}
 		if req.Header.Get("Authorization") != "Bearer upstream-test" || req.Header.Get("Content-Type") != "application/json" ||

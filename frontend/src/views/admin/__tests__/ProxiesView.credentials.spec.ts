@@ -22,7 +22,7 @@ const mountView = () => shallowMount(ProxiesView, {
 let wrapper: ReturnType<typeof mountView>
 beforeEach(() => {
   vi.clearAllMocks()
-  list.mockResolvedValue({ items: [{ id: 9, name: 'proxy', protocol: 'http', host: 'proxy.example', port: 8080, username: 'old-user', status: 'active' }], total: 1, pages: 1 })
+  list.mockResolvedValue({ items: [{ id: 9, name: 'proxy', protocol: 'http', host: 'proxy.example', port: 8080, has_credentials: true, status: 'active' }], total: 1, pages: 1 })
   getAllWithCount.mockResolvedValue([])
   update.mockResolvedValue({})
 })
@@ -40,7 +40,7 @@ async function submit() {
 describe('proxy credential updates', () => {
   it('sends an explicit empty username when cleared', async () => {
     await edit()
-    const username = wrapper.findAll<HTMLInputElement>('#edit-proxy-form input').find(input => input.element.value === 'old-user')!
+    const username = wrapper.get('#edit-proxy-form input[autocomplete="username"]')
     await username.setValue('')
     const payload = await submit()
     expect(payload.username).toBe('')
@@ -56,7 +56,7 @@ describe('proxy credential updates', () => {
   it('omits an untouched password when saving other settings', async () => {
     await edit()
     const payload = await submit()
-    expect(payload.username).toBe('old-user')
+    expect(payload).not.toHaveProperty('username')
     expect(payload).not.toHaveProperty('password')
   })
 

@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"math"
@@ -84,6 +85,8 @@ type openAIWSAcquireRequest struct {
 }
 
 type openAIWSHandshakeCompatibilityKey struct {
+	route               WorkerWebSocketRoute
+	egress              [32]byte
 	betaFeatures        string
 	codexInstallationID string
 	sessionIDHyphen     string
@@ -868,9 +871,12 @@ type openAIWSConnPool struct {
 }
 
 func newOpenAIWSConnPool(cfg *config.Config) *openAIWSConnPool {
+	return newOpenAIWSConnPoolWithDialer(cfg, newDefaultOpenAIWSClientDialer())
+}
+func newOpenAIWSConnPoolWithDialer(cfg *config.Config, dialer openAIWSClientDialer) *openAIWSConnPool {
 	pool := &openAIWSConnPool{
 		cfg:          cfg,
-		clientDialer: newDefaultOpenAIWSClientDialer(),
+		clientDialer: dialer,
 		workerStopCh: make(chan struct{}),
 	}
 	pool.startBackgroundWorkers()
@@ -1151,7 +1157,7 @@ func (p *openAIWSConnPool) acquire(ctx context.Context, req openAIWSAcquireReque
 
 retryAcquire:
 	accountID := req.Account.ID
-	compatibility := normalizeOpenAIWSHandshakeCompatibility(req.Account, req.Headers)
+	compatibility := p.handshakeKey(req)
 	routingAffinity := normalizeOpenAIWSRoutingAffinity(req.Headers)
 	effectiveMaxConns := p.effectiveMaxConnsByAccount(req.Account)
 	if effectiveMaxConns <= 0 {
@@ -1651,6 +1657,7 @@ func (p *openAIWSConnPool) cleanupAccountLocked(ap *openAIWSAccountPool, now tim
 		return nil
 	}
 	maxAge := p.maxConnAge()
+	route := p.activeWorkerRoute()
 
 	evicted := make([]*openAIWSConn, 0)
 	for id, conn := range ap.conns {
@@ -1661,7 +1668,7 @@ func (p *openAIWSConnPool) cleanupAccountLocked(ap *openAIWSAccountPool, now tim
 			}
 			continue
 		}
-		if conn.isClosed() || conn.isUnusable() {
+		if conn.isClosed() || conn.isUnusable() || conn.handshakeCompatibility.route != route && conn.waiters.Load() == 0 && conn.tryAcquire() {
 			delete(ap.conns, id)
 			if len(ap.pinnedConns) > 0 {
 				delete(ap.pinnedConns, id)
@@ -2132,7 +2139,14 @@ func (p *openAIWSConnPool) dialConn(ctx context.Context, req openAIWSAcquireRequ
 			return nil, err
 		}
 	}
-	conn, status, handshakeHeaders, err := p.clientDialer.Dial(ctx, req.WSURL, headers, req.ProxyURL)
+	key := p.handshakeKey(req)
+	dial := p.clientDialer.Dial
+	if d, ok := p.clientDialer.(*DistributedOpenAIWSDialer); ok {
+		dial = func(ctx context.Context, u string, h http.Header, proxy string) (openAIWSClientConn, int, http.Header, error) {
+			return d.dialRoute(ctx, u, h, proxy, key.route)
+		}
+	}
+	conn, status, handshakeHeaders, err := dial(ctx, req.WSURL, headers, req.ProxyURL)
 	if err != nil {
 		var handshakeErr *openAIWSHandshakeError
 		var responseBody []byte
@@ -2158,7 +2172,7 @@ func (p *openAIWSConnPool) dialConn(ctx context.Context, req openAIWSAcquireRequ
 	accountID := req.Account.ID
 	evict := func() { p.evictConn(accountID, id) }
 	pooledConn.onPeerClosed.Store(&evict)
-	pooledConn.handshakeCompatibility = normalizeOpenAIWSHandshakeCompatibility(req.Account, req.Headers)
+	pooledConn.handshakeCompatibility = key
 	pooledConn.routingAffinity = normalizeOpenAIWSRoutingAffinity(req.Headers)
 	return pooledConn, nil
 }
@@ -2365,6 +2379,21 @@ func normalizeOpenAIWSBetaFeatures(headers http.Header) string {
 	}
 	sort.Strings(normalized)
 	return strings.Join(normalized, ",")
+}
+
+func (p *openAIWSConnPool) activeWorkerRoute() WorkerWebSocketRoute {
+	if d, ok := p.clientDialer.(*DistributedOpenAIWSDialer); ok {
+		return d.pool.WorkerWebSocketRoute()
+	}
+	return nil
+}
+func (p *openAIWSConnPool) handshakeKey(req openAIWSAcquireRequest) openAIWSHandshakeCompatibilityKey {
+	key := normalizeOpenAIWSHandshakeCompatibility(req.Account, req.Headers)
+	key.route = p.activeWorkerRoute()
+	if key.route != nil {
+		key.egress = sha256.Sum256([]byte(req.WSURL + "\x00" + req.ProxyURL))
+	}
+	return key
 }
 
 func normalizeOpenAIWSHandshakeCompatibility(account *Account, headers http.Header) openAIWSHandshakeCompatibilityKey {

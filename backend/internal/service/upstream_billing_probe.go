@@ -621,6 +621,12 @@ func (s *UpstreamBillingProbeService) probeLoadedAccount(ctx context.Context, ac
 	if s.accountTestService == nil || s.accountTestService.httpUpstream == nil {
 		return s.persistProbeFailure(ctx, account, intervalMinutes, now, 0, "transport_unavailable", 0)
 	}
+	if a, ok, err := loadWorkerAccount(ctx, s.accountTestService.httpUpstream, s.accountRepo, account.ID); ok {
+		if err != nil {
+			return nil, err
+		}
+		account = a
+	}
 	// 平台放宽后取数直读 credentials：所有 API-key 平台的密钥与自定义上游
 	// 统一存放在 credentials.api_key / credentials.base_url。
 	apiKey := account.GetCredential("api_key")

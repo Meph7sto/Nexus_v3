@@ -1634,7 +1634,7 @@ func (s *OpenAIGatewayService) recheckSelectedOpenAIAccountFromDBBeforeProfit(ct
 		return account
 	}
 
-	latest, err := s.accountRepo.GetByID(ctx, account.ID)
+	latest, err := loadAccountForUpstream(ctx, s.httpUpstream, s.accountRepo, account.ID)
 	if err != nil || latest == nil {
 		return nil
 	}
@@ -1726,6 +1726,11 @@ func (s *OpenAIGatewayService) isOpenAIAccountBlockedBySchedulingThreshold(ctx c
 }
 
 func (s *OpenAIGatewayService) hydrateSelectedAccount(ctx context.Context, account *Account) (*Account, error) {
+	if account != nil {
+		if a, ok, err := loadWorkerAccount(ctx, s.httpUpstream, s.accountRepo, account.ID); ok {
+			return a, err
+		}
+	}
 	if account == nil || s.schedulerSnapshot == nil {
 		return account, nil
 	}

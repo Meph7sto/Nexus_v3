@@ -1027,6 +1027,7 @@ export interface ClaudeModel {
 }
 
 export interface Proxy {
+  has_credentials?: boolean
   id: number
   name: string
   protocol: ProxyProtocol

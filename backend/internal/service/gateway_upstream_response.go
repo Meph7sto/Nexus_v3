@@ -1112,6 +1112,9 @@ func (s *GatewayService) handleStreamingResponse(ctx context.Context, resp *http
 				return &streamingResult{usage: usage, firstTokenMs: firstTokenMs, clientDisconnect: clientDisconnected}, nil
 			}
 			if ev.err != nil {
+				if IsHTTPUpstreamRelayTerminal(ev.err) {
+					return &streamingResult{usage: usage, firstTokenMs: firstTokenMs, clientDisconnect: clientDisconnected}, ev.err
+				}
 				if sawTerminalEvent {
 					return &streamingResult{usage: usage, firstTokenMs: firstTokenMs, clientDisconnect: clientDisconnected}, nil
 				}

@@ -210,6 +210,9 @@ func (s *AntigravityGatewayService) Forward(ctx context.Context, c *gin.Context,
 					groupID:         0,  // Forward 方法没有 groupID，由上层处理粘性会话清除
 					sessionHash:     "", // Forward 方法没有 sessionHash，由上层处理粘性会话清除
 				})
+				if IsHTTPUpstreamRelayTerminal(retryErr) {
+					return nil, retryErr
+				}
 				if retryErr != nil {
 					appendOpsUpstreamError(c, OpsUpstreamErrorEvent{
 						ProxyID:            opsUpstreamProxyID(account),
@@ -338,6 +341,9 @@ func (s *AntigravityGatewayService) Forward(ctx context.Context, c *gin.Context,
 							groupID:         0,
 							sessionHash:     "",
 						})
+						if IsHTTPUpstreamRelayTerminal(retryErr) {
+							return nil, retryErr
+						}
 						if retryErr == nil {
 							retryResp := retryResult.resp
 							if retryResp.StatusCode < 400 {

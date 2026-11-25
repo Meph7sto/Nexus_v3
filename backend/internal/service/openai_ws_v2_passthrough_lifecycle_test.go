@@ -679,6 +679,8 @@ func TestPassthroughLifecycle_PreambleAllowsPromptClientCancel(t *testing.T) {
 	require.Equal(t, "response.cancel", gjson.GetBytes(cancelFrame, "type").String())
 
 	require.NoError(t, clientConn.Close(coderws.StatusNormalClosure, "done"))
+	// A client close starts the drain; a terminal event ends it without waiting for the first-output timer.
+	upstream.Send(`{"type":"response.cancelled","response":{"id":"resp_cancel","status":"cancelled"}}`)
 	select {
 	case <-serverErr:
 	case <-time.After(3 * time.Second):

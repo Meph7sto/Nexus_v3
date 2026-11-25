@@ -928,6 +928,9 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 				wsLastFailureReason,
 				&agentTaskRecoveryTried,
 			)
+			if IsHTTPUpstreamRelayTerminal(wsErr) {
+				return wsResult, wsErr
+			}
 			if wsErr == nil {
 				break
 			}
@@ -1087,9 +1090,6 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 		}
 
 		// Send request
-		if !imageIntent && s.allowsOpenAIResponsesWorker(c, account, upstreamReq) {
-			upstreamReq = upstreamReq.WithContext(WithDistributedHTTPUpstream(upstreamReq.Context()))
-		}
 		upstreamStart := time.Now()
 		resp, err := s.doOpenAIUpstream(upstreamReq, proxyURL, account)
 		SetOpsLatencyMs(c, OpsUpstreamLatencyMsKey, time.Since(upstreamStart).Milliseconds())

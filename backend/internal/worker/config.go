@@ -12,21 +12,22 @@ import (
 )
 
 type Config struct {
-	ListenAddr      string
-	NodeID          string
-	Version         string
-	SharedToken     string
-	PreviousToken   string
-	ProxyURL        string
-	DNSMode         string
-	AllowedTargets  []string
-	AllowPrivateH2C bool
-	TLSCertFile     string
-	TLSKeyFile      string
-	TLSClientCAFile string
-	MaxInFlight     int
-	MaxConnections  int
-	DrainTimeout    time.Duration
+	ListenAddr        string
+	NodeID            string
+	Version           string
+	SharedToken       string
+	PreviousToken     string
+	ProxyURL          string
+	AllowPrivateProxy *bool
+	DNSMode           string
+	AllowedTargets    []string
+	AllowPrivateH2C   bool
+	TLSCertFile       string
+	TLSKeyFile        string
+	TLSClientCAFile   string
+	MaxInFlight       int
+	MaxConnections    int
+	DrainTimeout      time.Duration
 }
 
 func ConfigFromEnv() (Config, error) {
@@ -45,6 +46,13 @@ func ConfigFromEnv() (Config, error) {
 			return Config{}, errors.New("WORKER_ALLOW_PRIVATE_H2C must be true or false")
 		}
 		cfg.AllowPrivateH2C = on
+	}
+	if raw := strings.TrimSpace(os.Getenv("WORKER_ALLOW_PRIVATE_PROXY")); raw != "" {
+		allow, err := strconv.ParseBool(raw)
+		if err != nil {
+			return Config{}, errors.New("WORKER_ALLOW_PRIVATE_PROXY must be true or false")
+		}
+		cfg.AllowPrivateProxy = &allow
 	}
 	var err error
 	if cfg.SharedToken, err = loadToken("WORKER_SHARED_TOKEN"); err != nil {

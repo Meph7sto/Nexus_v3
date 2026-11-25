@@ -364,7 +364,7 @@ func (s *AccountTestService) TestAccountConnection(c *gin.Context, accountID int
 	testOpts := firstAccountTestOptions(opts)
 
 	// Get account
-	account, err := s.accountRepo.GetByID(ctx, accountID)
+	account, err := loadAccountForUpstream(ctx, s.httpUpstream, s.accountRepo, accountID)
 	if err != nil {
 		return s.sendErrorAndEnd(c, "Account not found")
 	}
@@ -1864,7 +1864,7 @@ func (s *AccountTestService) testGrokRealtime(c *gin.Context, ctx context.Contex
 
 	dialer := s.grokWSDialer
 	if dialer == nil {
-		dialer = newDefaultOpenAIWSClientDialer()
+		dialer = openAIWSDialerFor(s.httpUpstream)
 	}
 
 	dialCtx, cancel := context.WithTimeout(ctx, grokRealtimeProbeTimeout)
@@ -1979,6 +1979,9 @@ func normalizeAccountTestImageDataURL(raw string) (string, error) {
 }
 
 func isTransientGrokTransportError(err error) bool {
+	if IsHTTPUpstreamRelayTerminal(err) {
+		return false
+	}
 	if err == nil {
 		return false
 	}

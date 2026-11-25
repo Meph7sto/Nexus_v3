@@ -22,7 +22,6 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
-	"github.com/Wei-Shaw/sub2api/internal/pkg/proxyurl"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/Wei-Shaw/sub2api/internal/workerproto"
 )
@@ -38,7 +37,7 @@ var (
 	workerOverlayIPv4     = netip.MustParsePrefix("100.64.0.0/10")
 )
 
-// DistributedHTTPUpstream selects a Worker only for explicitly opted-in requests.
+// DistributedHTTPUpstream routes upstream calls through the active Worker pool.
 type DistributedHTTPUpstream struct {
 	local   service.HTTPUpstream
 	current atomic.Pointer[workerSnapshot]
@@ -50,7 +49,6 @@ var _ service.HTTPUpstream = (*DistributedHTTPUpstream)(nil)
 
 type workerSnapshot struct {
 	nodes          []*relayWorker
-	defaultProxy   string
 	fallbackLocal  bool
 	maxAttempts    int
 	healthInterval time.Duration
@@ -137,10 +135,6 @@ func buildWorkerSnapshot(cfg config.WorkerPoolConfig) (*workerSnapshot, error) {
 	if !cfg.Enabled {
 		return nil, nil
 	}
-	proxy, ok := workerProxyKey(cfg.DefaultProxyURL)
-	if !ok {
-		return nil, errors.New("worker default proxy must be a SOCKS5 URL")
-	}
 	if cfg.HealthInterval < 0 || cfg.HealthTimeout < 0 || cfg.MaxAttempts < 0 ||
 		cfg.CircuitFailureThreshold < 0 || cfg.CircuitOpenTimeout < 0 {
 		return nil, errors.New("worker pool requires non-negative timings and attempt limits")
@@ -157,7 +151,6 @@ func buildWorkerSnapshot(cfg config.WorkerPoolConfig) (*workerSnapshot, error) {
 		cfg.CircuitOpenTimeout = workerCircuitDuration
 	}
 	snapshot := &workerSnapshot{
-		defaultProxy:   proxy,
 		fallbackLocal:  cfg.FallbackLocal,
 		maxAttempts:    cfg.MaxAttempts,
 		healthInterval: cfg.HealthInterval,
@@ -205,25 +198,6 @@ func buildWorkerSnapshot(cfg config.WorkerPoolConfig) (*workerSnapshot, error) {
 		})
 	}
 	return snapshot, nil
-}
-
-func workerProxyKey(value string) (string, bool) {
-	_, parsed, err := proxyurl.Parse(value)
-	if err != nil || parsed == nil || !strings.EqualFold(parsed.Scheme, "socks5h") ||
-		(parsed.Path != "" && parsed.Path != "/") || parsed.RawPath != "" ||
-		parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" {
-		return "", false
-	}
-	// Do not treat URLs with extra options as equivalent to the configured
-	// Worker egress. In particular, never consider an empty proxy equivalent.
-	parsed.Scheme = strings.ToLower(parsed.Scheme)
-	parsed.Path = ""
-	port := parsed.Port()
-	if port == "" {
-		port = "1080"
-	}
-	parsed.Host = net.JoinHostPort(strings.ToLower(parsed.Hostname()), port)
-	return parsed.String(), true
 }
 
 func workerEndpointURL(value string, allowPrivateH2C bool) (*url.URL, error) {
