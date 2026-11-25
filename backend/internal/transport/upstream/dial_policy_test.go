@@ -2,6 +2,7 @@ package upstream
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -40,6 +41,40 @@ func TestControlledDialPinsActualSOCKS5Destination(t *testing.T) {
 	require.Equal(t, "ok", string(body))
 	require.Equal(t, original, seenHost.Load())
 	require.Equal(t, int64(2), connections.Load())
+}
+
+func TestControlledHTTPProxyUsesAbsoluteFormAndPinsEachRedirect(t *testing.T) {
+	var requests atomic.Int64
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		if r.Method == http.MethodConnect || r.URL.Host != "93.184.216.34:80" {
+			t.Errorf("unexpected proxy request: %s %s", r.Method, r.RequestURI)
+			w.WriteHeader(403)
+			return
+		}
+		switch r.URL.Path {
+		case "/first":
+			http.Redirect(w, r, "/second?a=1&a=2", http.StatusFound)
+		case "/second":
+			// Redirect resolution is tested with the original authority by the pin callback.
+			if r.URL.RawQuery != "a=1&a=2" {
+				t.Errorf("redirect query was not preserved: %s", r.URL.RawQuery)
+			}
+			http.Redirect(w, r, "http://169.254.169.254/", http.StatusFound)
+		}
+	}))
+	t.Cleanup(proxy.Close)
+	client := NewClient(&Config{MaxConnections: 1, DialAddresses: func(_ context.Context, _, addr string) ([]string, error) {
+		if addr == "upstream.example:80" {
+			return []string{"93.184.216.34:80"}, nil
+		}
+		return nil, errors.New("destination denied by fixture")
+	}})
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "http://upstream.example/first", nil)
+	require.NoError(t, err)
+	_, err = client.Do(req, proxy.URL, 1, 1, RequestOptions{})
+	require.ErrorContains(t, err, "destination denied by fixture")
+	require.EqualValues(t, 2, requests.Load())
 }
 
 func TestControlledDialLimitsConnectionsAcrossTransports(t *testing.T) {

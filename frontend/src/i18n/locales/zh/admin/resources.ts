@@ -107,7 +107,9 @@ export default {
         allStatuses: '全部状态'
       },
       // Additional keys used in ProxiesView
-      copyProxyUrl: '复制代理 URL（不含凭据）',
+      copyProxyUrl: '复制代理 URL',
+      showPassword: '显示密码',
+      hidePassword: '隐藏密码',
       urlCopied: '代理 URL 已复制',
       allProtocols: '全部协议',
       allStatus: '全部状态',

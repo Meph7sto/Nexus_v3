@@ -2,6 +2,7 @@ package handler
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"time"
 
@@ -344,6 +345,17 @@ func failoverClientGone(c *gin.Context) bool {
 		c.Status(statusClientClosedRequest)
 	}
 	return true
+}
+
+func relayFailureResponse(err error) (status int, code, message string, ok bool) {
+	var failure *service.HTTPUpstreamRelayError
+	if !errors.As(err, &failure) || !failure.IsTerminal() {
+		return 0, "", "", false
+	}
+	if failure.Unsent {
+		return http.StatusServiceUnavailable, "worker_unavailable", "Worker route is unavailable", true
+	}
+	return http.StatusBadGateway, "upstream_outcome_unknown", "Upstream request may already have been processed", true
 }
 
 // sleepWithContext 等待指定时长，返回 false 表示 context 已取消。

@@ -331,15 +331,6 @@ func AccountFromServiceShallow(a *service.Account) *Account {
 		if mode := a.GetUserMsgQueueMode(); mode != "" {
 			out.UserMsgQueueMode = &mode
 		}
-		// TLS指纹伪装开关
-		if a.IsTLSFingerprintEnabled() {
-			enabled := true
-			out.EnableTLSFingerprint = &enabled
-		}
-		// TLS指纹模板ID
-		if profileID := a.GetTLSFingerprintProfileID(); profileID > 0 {
-			out.TLSFingerprintProfileID = &profileID
-		}
 		// 会话ID伪装开关
 		if a.IsSessionIDMaskingEnabled() {
 			enabled := true
@@ -359,6 +350,16 @@ func AccountFromServiceShallow(a *service.Account) *Account {
 			if customURL := a.GetCustomBaseURL(); customURL != "" {
 				out.CustomBaseURL = &customURL
 			}
+		}
+	}
+
+	if a.IsOpenAI() || a.IsAnthropicOAuthOrSetupToken() {
+		if a.IsTLSFingerprintEnabled() {
+			enabled := true
+			out.EnableTLSFingerprint = &enabled
+		}
+		if profileID := a.GetTLSFingerprintProfileID(); profileID > 0 || a.IsOpenAI() && profileID == -1 {
+			out.TLSFingerprintProfileID = &profileID
 		}
 	}
 
@@ -599,7 +600,7 @@ func ProxyWithAccountCountFromService(p *service.ProxyWithAccountCount) *ProxyWi
 }
 
 // ProxyFromServiceAdmin converts a service Proxy to AdminProxy DTO for admin users.
-// Credentials are write-only on both admin and user endpoints.
+// Ordinary account and proxy endpoints must use the credential-free Proxy DTO.
 func ProxyFromServiceAdmin(p *service.Proxy) *AdminProxy {
 	if p == nil {
 		return nil
@@ -609,7 +610,9 @@ func ProxyFromServiceAdmin(p *service.Proxy) *AdminProxy {
 		return nil
 	}
 	return &AdminProxy{
-		Proxy: *base,
+		Proxy:    *base,
+		Username: p.Username,
+		Password: p.Password,
 	}
 }
 

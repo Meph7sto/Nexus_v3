@@ -11,11 +11,11 @@ Start with one Entry, one [Data host](../data/single/compose.yaml), and two [Wor
 
 ## Entry setup and cutover
 
-Dynamic routes use the Worker resolver to check destination addresses, including through SOCKS5H or HTTP CONNECT. Private destinations are denied by default; explicitly allowlist private IP literals only for known self-hosted origins. Requests marked public-only cannot use that exception. `WORKER_DNS_MODE=trusted_proxy` applies only to legacy relay requests with a configured static SOCKS5H proxy and a target allowlist.
+By default the Worker resolves and pins the destination, including for SOCKS5H and HTTP proxies. Private destinations are denied by default; explicitly allowlist private IP literals only for known self-hosted origins. Public-only requests cannot use that exception. In an environment without reliable public DNS, `WORKER_DNS_MODE=trusted_proxy` delegates DNS for dynamic SOCKS5H routes on an exact `WORKER_ALLOWED_TARGETS` list. Enable this only when every SOCKS5H proxy allowed to serve those routes enforces the exact destination allowlist and blocks non-public IPs after resolution. Public-only requests still resolve and pin on the Worker. Direct, SOCKS5, and HTTP routes never delegate target DNS.
 
 Start [Entry](../entry/compose.yaml) with the existing standalone setup environment variables for the private Postgres and Redis endpoints. Use the existing first-run wizard or set `AUTO_SETUP=true` with explicit admin, JWT and TOTP settings. Keep the initialized `config.yaml` in the Entry data directory.
 
-Manage account proxies and credentials only in Entry. Each relay carries the current account route, including direct egress. No Worker restart is needed. `WORKER_ALLOWED_TARGETS` optionally restricts destination authorities. `WORKER_ALLOW_PRIVATE_PROXY=false` limits the proxy itself to public addresses; it does not relax destination checks. Proxy exports omit usernames and passwords; supply those separately when importing a proxy that needs authentication.
+Manage account proxies and credentials only in Entry. Each relay carries the current account route, including direct egress. No Worker restart is needed. `WORKER_ALLOWED_TARGETS` optionally restricts destination authorities. `WORKER_ALLOW_PRIVATE_PROXY=false` limits the proxy itself to public addresses; it does not relax destination checks. Authorized administrator views and explicit backups include proxy credentials, as in V2. Protect exported files as secrets.
 
 Merge the [Worker pool example](../entry/worker-pool.example.yaml) into the Entry configuration. Enable the pool after provisioning authenticated Workers. HTTP/SSE and native OpenAI WebSocket handshakes use the pool. Disabling the pool restores local transport for new requests.
 

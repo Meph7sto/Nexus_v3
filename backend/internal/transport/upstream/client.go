@@ -466,7 +466,7 @@ func (s *Client) getClientEntryWithTLS(proxyURL string, accountID int64, account
 		return nil, fmt.Errorf("build TLS fingerprint transport: %w", err)
 	}
 
-	client := &http.Client{Transport: transport}
+	client := &http.Client{Transport: s.withHTTPForwardProxy(transport, parsedProxy, settings)}
 	if s.shouldValidateResolvedIP() {
 		client.CheckRedirect = s.redirectChecker
 	}
@@ -621,7 +621,7 @@ func (s *Client) getClientEntry(proxyURL string, accountID int64, accountConcurr
 		s.mu.Unlock()
 		return nil, err
 	}
-	client := &http.Client{Transport: transport}
+	client := &http.Client{Transport: s.withHTTPForwardProxy(transport, parsedProxy, settings)}
 	if s.shouldValidateResolvedIP() {
 		client.CheckRedirect = s.redirectChecker
 	}

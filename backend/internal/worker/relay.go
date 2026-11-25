@@ -53,8 +53,8 @@ func (s *Server) relay(w http.ResponseWriter, r *http.Request) {
 	}
 	var resp *http.Response
 	forward := s.upstream
-	if s.legacyClient != nil && r.Header.Get(workerproto.HeaderProxyID) == workerproto.DefaultProxyID && !opts.PublicHostsOnly {
-		forward = s.legacyClient
+	if s.useTrustedProxyDNS(proxy, opts.PublicHostsOnly) {
+		forward = s.trustedProxyClient
 	}
 	if tlsProfile == nil {
 		resp, err = forward.Do(req, proxy, accountID, concurrency, opts)
@@ -197,6 +197,11 @@ func (s *Server) routeMetadata(r *http.Request) (string, *tlsfingerprint.Profile
 			if err != nil || p == nil || p.Hostname() == "" || p.RawQuery != "" || p.ForceQuery || p.Fragment != "" || p.Path != "" && p.Path != "/" {
 				return "", nil, invalid
 			}
+			// Parse normalizes socks5 to socks5h for local V2 callers. Keep the
+			// declared scheme here so only an explicit socks5h can delegate DNS.
+			if scheme, _, _ := strings.Cut(strings.TrimSpace(spec.URL), ":"); strings.EqualFold(scheme, "socks5") {
+				p.Scheme = "socks5"
+			}
 			proxy = p.String()
 		default:
 			return "", nil, invalid
@@ -231,7 +236,7 @@ func validUpstreamHeaders(h http.Header, target *url.URL) bool {
 				return false
 			}
 			wanted, _ := targetAddress(target)
-			got, ok := targetAddress(&url.URL{Scheme: "https", Host: values[0]})
+			got, ok := targetAddress(&url.URL{Scheme: target.Scheme, Host: values[0]})
 			if !ok || got != wanted {
 				return false
 			}

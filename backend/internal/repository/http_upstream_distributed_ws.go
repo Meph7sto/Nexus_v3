@@ -22,7 +22,7 @@ func (s *DistributedHTTPUpstream) WorkerWebSocketRoute() service.WorkerWebSocket
 	return nil
 }
 
-func (s *workerSnapshot) RoundTripWebSocket(req *http.Request, proxy string) (*http.Response, error) {
+func (s *workerSnapshot) RoundTripWebSocket(req *http.Request, proxy string, accountID int64) (*http.Response, error) {
 	meta, err := workerproto.EncodeJSON(workerproto.EndToEndHeaders(req.Header))
 	if err != nil {
 		return nil, err
@@ -33,12 +33,12 @@ func (s *workerSnapshot) RoundTripWebSocket(req *http.Request, proxy string) (*h
 	}
 	attempted := map[*relayWorker]bool{}
 	for len(attempted) < s.maxAttempts && !s.retired.Load() && req.Context().Err() == nil {
-		n := s.selectWorker(0, attempted)
+		n := s.selectWorker(accountID, attempted)
 		if n == nil {
 			break
 		}
 		attempted[n] = true
-		resp, err, retry := s.wsHandshake(req, n, meta, spec)
+		resp, err, retry := s.wsHandshake(req, n, meta, spec, accountID)
 		if !retry {
 			return resp, err
 		}
@@ -49,7 +49,7 @@ func (s *workerSnapshot) RoundTripWebSocket(req *http.Request, proxy string) (*h
 	return nil, relayFailure(service.HTTPUpstreamRelayWorker, true, errNoHealthyWorker)
 }
 
-func (s *workerSnapshot) wsHandshake(req *http.Request, n *relayWorker, meta, spec string) (*http.Response, error, bool) {
+func (s *workerSnapshot) wsHandshake(req *http.Request, n *relayWorker, meta, spec string, accountID int64) (*http.Response, error, bool) {
 	ctx, cancel := context.WithCancel(context.WithoutCancel(req.Context()))
 	stop := context.AfterFunc(req.Context(), cancel)
 	var connected atomic.Bool
@@ -66,11 +66,11 @@ func (s *workerSnapshot) wsHandshake(req *http.Request, n *relayWorker, meta, sp
 	r.Header.Set("Authorization", "Bearer "+n.token)
 	r.Header.Set(workerproto.HeaderMethod, "GET")
 	r.Header.Set(workerproto.HeaderTargetURL, req.URL.String())
-	r.Header.Set(workerproto.HeaderAccountID, "0")
+	r.Header.Set(workerproto.HeaderAccountID, strconv.FormatInt(accountID, 10))
 	r.Header.Set(workerproto.HeaderAccountConcurrency, "1")
 	r.Header.Set(workerproto.HeaderUpstreamHeaders, meta)
 	r.Header.Set(workerproto.HeaderProxy, spec)
-	r.Header.Set(workerproto.HeaderPublicHostsOnly, "true")
+	r.Header.Set(workerproto.HeaderPublicHostsOnly, strconv.FormatBool(service.HTTPUpstreamPublicHostsOnly(req.Context())))
 	n.localLoad.Add(1)
 	release := func() {
 		stop()

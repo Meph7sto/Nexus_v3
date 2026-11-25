@@ -26,20 +26,20 @@ type Upstream interface {
 const maxInFlight = 65535
 
 type Server struct {
-	addr         string
-	nodeID       string
-	version      string
-	drainTimeout time.Duration
-	maxInFlight  int
-	started      time.Time
-	tlsConfig    *tls.Config
-	targets      targetPolicy
-	proxyURL     string
-	upstream     Upstream
-	client       *upstream.Client
-	legacyClient *upstream.Client
-	tokens       [2][sha256.Size]byte
-	hasPrevious  int
+	addr               string
+	nodeID             string
+	version            string
+	drainTimeout       time.Duration
+	maxInFlight        int
+	started            time.Time
+	tlsConfig          *tls.Config
+	targets            targetPolicy
+	proxyURL           string
+	upstream           Upstream
+	client             *upstream.Client
+	trustedProxyClient *upstream.Client
+	tokens             [2][sha256.Size]byte
+	hasPrevious        int
 
 	mu       sync.Mutex
 	draining bool
@@ -66,8 +66,8 @@ func New(cfg Config, forward Upstream) (*Server, error) {
 	switch cfg.DNSMode {
 	case "", "local":
 	case "trusted_proxy":
-		if len(targets.authorities) == 0 || cfg.ProxyURL == "" || cfg.MaxConnections < 2 {
-			return nil, errors.New("trusted_proxy needs an explicit legacy proxy, target allowlist and at least two connections")
+		if len(targets.authorities) == 0 || cfg.MaxConnections < 2 {
+			return nil, errors.New("trusted_proxy needs an explicit target allowlist and at least two connections")
 		}
 	default:
 		return nil, errors.New("WORKER_DNS_MODE must be local or trusted_proxy")
@@ -103,25 +103,25 @@ func New(cfg Config, forward Upstream) (*Server, error) {
 		ProxyDNS:       targets.proxyDNS,
 		MaxConnections: cfg.MaxConnections,
 	}
-	var legacy *upstream.Client
+	var trusted *upstream.Client
 	if cfg.DNSMode == "trusted_proxy" {
-		legacyConfig := transportConfig
-		legacyConfig.MaxConnections = cfg.MaxConnections / 2
-		legacyConfig.MaxUpstreamClients /= 2
-		transportConfig.MaxConnections -= legacyConfig.MaxConnections
-		transportConfig.MaxUpstreamClients -= legacyConfig.MaxUpstreamClients
-		legacyTargets := targets
-		legacyTargets.proxyDNS = true
-		legacyConfig.ProxyDNS = true
-		legacyConfig.DialAddresses = legacyTargets.dialAddresses
-		legacy = upstream.NewClient(&legacyConfig)
+		trustedConfig := transportConfig
+		trustedConfig.MaxConnections = cfg.MaxConnections / 2
+		trustedConfig.MaxUpstreamClients /= 2
+		transportConfig.MaxConnections -= trustedConfig.MaxConnections
+		transportConfig.MaxUpstreamClients -= trustedConfig.MaxUpstreamClients
+		trustedTargets := targets
+		trustedTargets.proxyDNS = true
+		trustedConfig.ProxyDNS = true
+		trustedConfig.DialAddresses = trustedTargets.dialAddresses
+		trusted = upstream.NewClient(&trustedConfig)
 	}
 	client := upstream.NewClient(&transportConfig)
 	if forward == nil {
 		forward = client
 	}
 	s := &Server{
-		client: client, legacyClient: legacy,
+		client: client, trustedProxyClient: trusted,
 		addr:         cfg.ListenAddr,
 		nodeID:       cfg.NodeID,
 		version:      cfg.Version,
@@ -139,6 +139,11 @@ func New(cfg Config, forward Upstream) (*Server, error) {
 		s.hasPrevious = 1
 	}
 	return s, nil
+}
+
+// Public-only requests always pin the locally validated IP, even in trusted mode.
+func (s *Server) useTrustedProxyDNS(proxy string, publicHostsOnly bool) bool {
+	return s.trustedProxyClient != nil && !publicHostsOnly && strings.HasPrefix(proxy, "socks5h://")
 }
 
 func validToken(token string) bool {

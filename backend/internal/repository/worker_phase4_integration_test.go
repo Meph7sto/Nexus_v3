@@ -64,7 +64,9 @@ func phase4Resolver() *net.Resolver {
 			}
 			q := query.Questions[0]
 			msg := dnsmessage.Message{Header: dnsmessage.Header{ID: query.ID, Response: true, RecursionAvailable: true}, Questions: query.Questions}
-			if q.Type == dnsmessage.TypeA {
+			if q.Name.String() == "proxy-only.example." {
+				msg.Header.RCode = dnsmessage.RCodeNameError
+			} else if q.Type == dnsmessage.TypeA {
 				msg.Answers = []dnsmessage.Resource{{Header: dnsmessage.ResourceHeader{Name: q.Name, Type: q.Type, Class: q.Class, TTL: 5}, Body: &dnsmessage.AResource{A: [4]byte{1, 1, 1, 1}}}}
 			}
 			b, _ := msg.Pack()
@@ -132,7 +134,7 @@ func phase4HTTPProxy(t *testing.T, target string, cert *tls.Certificate) (string
 	return p.String(), &calls, &password
 }
 
-func phase4SOCKS(t *testing.T, target, user string) (string, *atomic.Int32) {
+func phase4SOCKS(t *testing.T, target, user string, remoteName ...string) (string, *atomic.Int32) {
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = l.Close() })
@@ -160,8 +162,14 @@ func phase4SOCKS(t *testing.T, target, user string) (string, *atomic.Int32) {
 					return
 				}
 				_, _ = c.Write([]byte{1, 0})
-				if !bytes.Equal(read(4), []byte{5, 1, 0, 1}) || !bytes.Equal(read(6), []byte{1, 1, 1, 1, 1, 187}) {
-					return
+				if len(remoteName) == 0 {
+					if !bytes.Equal(read(4), []byte{5, 1, 0, 1}) || !bytes.Equal(read(6), []byte{1, 1, 1, 1, 1, 187}) {
+						return
+					}
+				} else {
+					if !bytes.Equal(read(4), []byte{5, 1, 0, 3}) || string(read(int(read(1)[0]))) != remoteName[0] || !bytes.Equal(read(2), []byte{1, 187}) {
+						return
+					}
 				}
 				calls.Add(1)
 				_, _ = c.Write([]byte{5, 0, 0, 1, 0, 0, 0, 0, 0, 0})
@@ -236,7 +244,7 @@ func assertPhase4StoredProxyRouting(t *testing.T, pool *DistributedHTTPUpstream,
 
 func runPhase4Routes(t *testing.T) {
 	net.DefaultResolver = phase4Resolver()
-	hosts := []string{"chatgpt.com", "api.anthropic.com", "generativelanguage.googleapis.com", "cloudcode-pa.googleapis.com", grokCLIProxyHost, grokOfficialAPIHost, "custom.example"}
+	hosts := []string{"chatgpt.com", "api.anthropic.com", "generativelanguage.googleapis.com", "cloudcode-pa.googleapis.com", grokCLIProxyHost, grokOfficialAPIHost, "custom.example", "proxy-only.example"}
 	cert := phase4Cert(t, hosts)
 	var hellos, fallback atomic.Int32
 	origin := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -399,4 +407,41 @@ func runPhase4Routes(t *testing.T) {
 	require.Error(t, err)
 	require.NotContains(t, err.Error(), "credential")
 	require.Equal(t, before, c1.Load())
+	t.Run("explicit trusted DNS with no static proxy", func(t *testing.T) {
+		const host = "proxy-only.example"
+		raw, calls := phase4SOCKS(t, origin.Listener.Addr().String(), "trusted", host)
+		trustedCfg := worker.Config{SharedToken: testWorkerToken, NodeID: "trusted", AllowPrivateH2C: true, DNSMode: "trusted_proxy", AllowedTargets: []string{host}}
+		trusted, err := worker.New(trustedCfg, nil)
+		require.NoError(t, err)
+		trustedPoolConfig := testPoolConfig(testWorkerOrigin(t, "trusted", trusted))
+		trustedPoolConfig.FallbackLocal = false
+		trustedPool := testDistributedPool(t, testLocalUpstream(func(*http.Request, string) (*http.Response, error) {
+			return nil, io.ErrUnexpectedEOF
+		}), trustedPoolConfig)
+		req, err := http.NewRequestWithContext(t.Context(), "GET", "https://"+host+"/v1/test?a=1&a=2", nil)
+		require.NoError(t, err)
+		req.Header.Set("Authorization", "Bearer test-upstream")
+		resp, err := trustedPool.Do(req, "socks5h://"+raw, 42, 1)
+		require.NoError(t, err)
+		require.Equal(t, 200, resp.StatusCode)
+		_, err = io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		require.NoError(t, err)
+		require.EqualValues(t, 1, calls.Load())
+
+		// Neither a public-only request nor socks5 may bypass local resolution.
+		_, err = trustedPool.Do(req.WithContext(service.WithHTTPUpstreamPublicHostsOnly(t.Context())), "socks5h://"+raw, 42, 1)
+		require.Error(t, err)
+		_, err = trustedPool.Do(req, "socks5://"+raw, 42, 1)
+		require.Error(t, err)
+		require.EqualValues(t, 1, calls.Load())
+
+		ctx, cancel := context.WithTimeout(service.WithWorkerWebSocketAccount(t.Context(), 42), 5*time.Second)
+		defer cancel()
+		ws := service.NewDistributedOpenAIWSDialer(trustedPool)
+		conn, _, _, err := ws.Dial(ctx, "wss://"+host+"/socket", req.Header, "socks5h://"+raw)
+		require.NoError(t, err)
+		require.NoError(t, conn.Close())
+		require.EqualValues(t, 2, calls.Load())
+	})
 }

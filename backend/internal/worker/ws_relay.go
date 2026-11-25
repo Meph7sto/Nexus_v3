@@ -22,7 +22,7 @@ func (s *Server) wsRelay(w http.ResponseWriter, r *http.Request) {
 	}
 	defer s.release()
 	req, _, _, _, code := s.parseRelay(r)
-	if code != "" || req.Method != "GET" || req.URL.Scheme != "https" || req.Header.Get("Sec-WebSocket-Key") == "" {
+	if code != "" || req.Method != "GET" || req.URL.Scheme != "https" || privateLiteral(req.URL.Hostname()) || req.Header.Get("Sec-WebSocket-Key") == "" {
 		writeRelayError(w, 400, workerproto.CodeInvalidRequest, workerproto.OutcomeUnsent)
 		return
 	}
@@ -31,7 +31,11 @@ func (s *Server) wsRelay(w http.ResponseWriter, r *http.Request) {
 		writeRelayError(w, 400, workerproto.CodeInvalidRequest, workerproto.OutcomeUnsent)
 		return
 	}
-	t, err := s.client.ControlledTransport(proxy, profile)
+	client := s.client
+	if s.useTrustedProxyDNS(proxy, r.Header.Get(workerproto.HeaderPublicHostsOnly) == "true") {
+		client = s.trustedProxyClient
+	}
+	t, err := client.ControlledTransport(proxy, profile)
 	if err != nil {
 		writeRelayError(w, 400, workerproto.CodeInvalidRequest, workerproto.OutcomeUnsent)
 		return

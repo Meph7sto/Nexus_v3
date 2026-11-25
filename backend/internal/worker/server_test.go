@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -65,6 +66,21 @@ func startH2C(t *testing.T, f forwardFunc) (*Server, *http.Client, string, conte
 		}
 	})
 	return s, client, "http://" + listener.Addr().String(), cancel, done
+}
+
+func TestRelayHostUsesTargetScheme(t *testing.T) {
+	for _, raw := range []string{"http://api.example.com/messages", "https://api.example.com/messages"} {
+		req, err := url.Parse(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !validUpstreamHeaders(http.Header{"Host": {"api.example.com"}}, req) {
+			t.Fatalf("default port should match target %s", raw)
+		}
+		if validUpstreamHeaders(http.Header{"Host": {"api.example.com:8080"}}, req) {
+			t.Fatalf("a different port must not match target %s", raw)
+		}
+	}
 }
 
 func relayRequest(t *testing.T, base string, body io.Reader) *http.Request {

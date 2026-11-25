@@ -2146,6 +2146,9 @@ func (p *openAIWSConnPool) dialConn(ctx context.Context, req openAIWSAcquireRequ
 			return d.dialRoute(ctx, u, h, proxy, key.route)
 		}
 	}
+	if req.Account != nil {
+		ctx = WithWorkerWebSocketAccount(ctx, req.Account.ID)
+	}
 	conn, status, handshakeHeaders, err := dial(ctx, req.WSURL, headers, req.ProxyURL)
 	if err != nil {
 		var handshakeErr *openAIWSHandshakeError

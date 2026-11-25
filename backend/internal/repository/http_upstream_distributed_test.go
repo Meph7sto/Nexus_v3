@@ -98,6 +98,41 @@ func awaitWorkerHealth(t *testing.T, snapshot *workerSnapshot) {
 	}, 3*time.Second, 10*time.Millisecond)
 }
 
+func TestWorkerWebSocketSelectsByAccount(t *testing.T) {
+	node := func(id string) config.WorkerNodeConfig {
+		return testMockWorker(t, id, func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != workerproto.WSRelayPath {
+				t.Errorf("unexpected path: %s", r.URL.Path)
+			}
+			w.Header().Set("X-Worker", id)
+			w.Header().Set("X-Account", r.Header.Get(workerproto.HeaderAccountID))
+			w.Header().Set(workerproto.HeaderUpstreamStatus, "403")
+			w.Header().Set("Trailer", workerproto.HeaderCompletion)
+			w.WriteHeader(200)
+			w.Header().Set(workerproto.HeaderCompletion, workerproto.CompletionComplete)
+		})
+	}
+	pool := testDistributedPool(t, testLocalUpstream(func(*http.Request, string) (*http.Response, error) {
+		return nil, io.ErrUnexpectedEOF
+	}), testPoolConfig(node("a"), node("b")))
+	snapshot := pool.current.Load()
+	accounts := map[string]int64{}
+	for i := int64(1); i < 100 && len(accounts) < 2; i++ {
+		accounts[snapshot.selectWorker(i, nil).id] = i
+	}
+	require.Len(t, accounts, 2)
+	for worker, accountID := range accounts {
+		req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "https://chatgpt.com/socket", nil)
+		require.NoError(t, err)
+		resp, err := snapshot.RoundTripWebSocket(req, "", accountID)
+		require.NoError(t, err)
+		require.Equal(t, 403, resp.StatusCode)
+		require.Equal(t, worker, resp.Header.Get("X-Worker"))
+		require.Equal(t, strconv.FormatInt(accountID, 10), resp.Header.Get("X-Account"))
+		_ = resp.Body.Close()
+	}
+}
+
 func testRelayRequest(t *testing.T, ctx context.Context, body io.Reader) *http.Request {
 	t.Helper()
 	ctx = service.WithDistributedHTTPUpstream(service.WithHTTPUpstreamProfile(ctx, service.HTTPUpstreamProfileOpenAI))

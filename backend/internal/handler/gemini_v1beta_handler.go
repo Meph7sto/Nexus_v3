@@ -769,6 +769,9 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 			accountReleaseFunc()
 		}
 		if err != nil {
+			if writeGeminiRelayFailure(c, err) {
+				return
+			}
 			var failoverErr *service.UpstreamFailoverError
 			if errors.As(err, &failoverErr) {
 				failoverAction := fs.HandleFailoverError(c.Request.Context(), h.gatewayService, account.ID, account.Platform, account.GetPoolModeRetryCount(), failoverErr)
@@ -883,6 +886,29 @@ func parseGeminiModelAction(rest string) (model string, action string, err error
 	return "", "", &pathParseError{"invalid model action path"}
 }
 
+func writeGeminiRelayFailure(c *gin.Context, err error) bool {
+	status, code, message, ok := relayFailureResponse(err)
+	if !ok {
+		return false
+	}
+	if failoverClientGone(c) {
+		return true
+	}
+	if c.Writer.Written() {
+		if strings.HasPrefix(c.Writer.Header().Get("Content-Type"), "text/event-stream") {
+			service.SetOpsLocalErrorType(c, code, "")
+			c.SSEvent("error", googleErrorPayload(status, message))
+			c.Writer.Flush()
+		}
+		return true
+	}
+	if status == http.StatusBadGateway {
+		c.Header("x-should-retry", "false")
+	}
+	googleErrorWithType(c, status, code, "", message)
+	return true
+}
+
 func (h *GatewayHandler) handleGeminiFailoverExhausted(c *gin.Context, failoverErr *service.UpstreamFailoverError) {
 	if failoverErr == nil {
 		googleError(c, http.StatusBadGateway, "Upstream request failed")
@@ -962,13 +988,11 @@ func googlePlatformError(c *gin.Context, status int, message string) {
 // 与 Claude / OpenAI 格式错误同口径分类；errType 为空时不登记。
 func googleErrorWithType(c *gin.Context, status int, errType, code, message string) {
 	service.SetOpsLocalErrorType(c, errType, code)
-	c.JSON(status, gin.H{
-		"error": gin.H{
-			"code":    status,
-			"message": message,
-			"status":  googleapi.HTTPStatusToGoogleStatus(status),
-		},
-	})
+	c.JSON(status, googleErrorPayload(status, message))
+}
+
+func googleErrorPayload(status int, message string) gin.H {
+	return gin.H{"error": gin.H{"code": status, "message": message, "status": googleapi.HTTPStatusToGoogleStatus(status)}}
 }
 
 // googleClientErrorType 返回客户端请求类 4xx 状态码对应的 ops 错误类型；其余状态码返回空串。

@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/tlsfingerprint"
@@ -53,6 +54,103 @@ func setControlledTLSProfile(t *http.Transport, profile *tlsfingerprint.Profile)
 		defer cancel()
 		return dial(ctx, network, addr)
 	}
+}
+
+// For an HTTP origin, RFC 9112 forward proxies expect absolute-form requests.
+// For HTTPS we keep CONNECT so TLS uses the original SNI. Both paths pin the target.
+func (s *Client) withHTTPForwardProxy(t *http.Transport, p *url.URL, settings poolSettings) http.RoundTripper {
+	if s.cfg == nil || s.cfg.DialAddresses == nil || p == nil || p.Scheme != "http" && p.Scheme != "https" {
+		return t
+	}
+	plain := &http.Transport{
+		Proxy: http.ProxyURL(p), MaxIdleConns: settings.maxIdleConns,
+		MaxIdleConnsPerHost: settings.maxIdleConnsPerHost, MaxConnsPerHost: settings.maxConnsPerHost,
+		IdleConnTimeout: settings.idleConnTimeout, ResponseHeaderTimeout: settings.responseHeaderTimeout,
+		TLSHandshakeTimeout: t.TLSHandshakeTimeout, DisableKeepAlives: t.DisableKeepAlives,
+	}
+	plain.DialContext = s.proxyDialContext
+	return &controlledHTTPForwardProxy{tunnel: t, plain: plain, pin: s.cfg.DialAddresses}
+}
+
+type controlledHTTPForwardProxy struct {
+	tunnel, plain *http.Transport
+	pin           func(context.Context, string, string) ([]string, error)
+}
+
+func (p *controlledHTTPForwardProxy) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.URL.Scheme != "http" {
+		return p.tunnel.RoundTrip(req)
+	}
+	port := req.URL.Port()
+	if port == "" {
+		port = "80"
+	}
+	ctx, cancel := context.WithTimeout(req.Context(), 30*time.Second)
+	targets, err := p.pin(ctx, "tcp", net.JoinHostPort(req.URL.Hostname(), port))
+	cancel()
+	if err != nil || len(targets) == 0 {
+		if req.Body != nil {
+			_ = req.Body.Close()
+		}
+		if err != nil {
+			return nil, err
+		}
+		return nil, errors.New("invalid controlled destination")
+	}
+	target := targets[0]
+	ip, targetPort, err := net.SplitHostPort(target)
+	if err != nil || net.ParseIP(ip) == nil || targetPort != port {
+		if req.Body != nil {
+			_ = req.Body.Close()
+		}
+		return nil, errors.New("invalid controlled destination")
+	}
+	out := req.Clone(req.Context())
+	if out.Host == "" {
+		out.Host = req.URL.Host
+	}
+	out.URL.Host = target
+	// WriteProxy normally builds the absolute URL from Host. Keep the validated
+	// IP in the request target even when the original Host header is present.
+	path := req.URL.EscapedPath()
+	if !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+	out.URL.Opaque = "//" + target + path
+	resp, err := p.plain.RoundTrip(out)
+	if resp != nil {
+		resp.Request = req
+	}
+	return resp, err
+}
+
+func (p *controlledHTTPForwardProxy) CloseIdleConnections() {
+	p.tunnel.CloseIdleConnections()
+	p.plain.CloseIdleConnections()
+}
+
+func (s *Client) proxyDialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	if pin := s.cfg.ProxyAddresses; pin != nil {
+		ips, err := pin(ctx, network, addr)
+		if err != nil || len(ips) == 0 {
+			return nil, errors.New("proxy address denied")
+		}
+		addr = ips[0]
+	}
+	if s.connections != nil && !s.acquireConnectionSlot() {
+		return nil, errors.New("upstream connection limit reached")
+	}
+	conn, err := newUpstreamDialer().DialContext(ctx, network, addr)
+	if s.connections == nil {
+		return conn, err
+	}
+	if err != nil {
+		<-s.connections
+		return nil, err
+	}
+	return &limitedConn{Conn: conn, slots: s.connections}, nil
 }
 
 func (s *Client) configureRoute(t *http.Transport, p *url.URL) error {

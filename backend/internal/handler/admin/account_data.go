@@ -94,19 +94,12 @@ type DataImportError struct {
 	Message  string `json:"message"`
 }
 
-// The export reference links records within the payload, without embedding credentials.
-func exportProxyKey(p service.Proxy) string {
-	if p.Username != "" || p.Password != "" {
-		return fmt.Sprintf("proxy-reference:%d", p.ID)
-	}
-	return buildProxyKey(p.Protocol, p.Host, p.Port, "", "")
-}
-
 func buildProxyKey(protocol, host string, port int, username, password string) string {
 	return fmt.Sprintf("%s|%s|%d|%s|%s", strings.TrimSpace(protocol), strings.TrimSpace(host), port, strings.TrimSpace(username), strings.TrimSpace(password))
 }
 
 func (h *AccountHandler) ExportData(c *gin.Context) {
+	c.Header("Cache-Control", "no-store")
 	ctx := c.Request.Context()
 
 	selectedIDs, err := parseAccountIDs(c)
@@ -166,7 +159,7 @@ func (h *AccountHandler) ExportData(c *gin.Context) {
 	dataProxies := make([]DataProxy, 0, len(proxies))
 	for i := range proxies {
 		p := proxies[i]
-		key := exportProxyKey(p)
+		key := buildProxyKey(p.Protocol, p.Host, p.Port, p.Username, p.Password)
 		proxyKeyByID[p.ID] = key
 
 		var expiresAt *int64
@@ -179,17 +172,18 @@ func (h *AccountHandler) ExportData(c *gin.Context) {
 			backupProxyName = proxyNameByID[*p.BackupProxyID]
 		}
 		dataProxies = append(dataProxies, DataProxy{
-			ProxyKey:            key,
-			Name:                p.Name,
-			Protocol:            p.Protocol,
-			Host:                p.Host,
-			Port:                p.Port,
-			CredentialsRequired: p.Username != "" || p.Password != "",
-			Status:              p.Status,
-			ExpiresAt:           expiresAt,
-			FallbackMode:        p.FallbackMode,
-			BackupProxyName:     backupProxyName,
-			ExpiryWarnDays:      p.ExpiryWarnDays,
+			ProxyKey:        key,
+			Name:            p.Name,
+			Protocol:        p.Protocol,
+			Host:            p.Host,
+			Port:            p.Port,
+			Username:        p.Username,
+			Password:        p.Password,
+			Status:          p.Status,
+			ExpiresAt:       expiresAt,
+			FallbackMode:    p.FallbackMode,
+			BackupProxyName: backupProxyName,
+			ExpiryWarnDays:  p.ExpiryWarnDays,
 		})
 	}
 

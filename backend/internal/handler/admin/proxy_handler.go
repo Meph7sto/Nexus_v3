@@ -57,6 +57,7 @@ type UpdateProxyRequest struct {
 // List handles listing all proxies with pagination
 // GET /api/v1/admin/proxies
 func (h *ProxyHandler) List(c *gin.Context) {
+	c.Header("Cache-Control", "no-store")
 	if h.scopedAdminProxyRead(c) {
 		return
 	}
@@ -89,6 +90,7 @@ func (h *ProxyHandler) List(c *gin.Context) {
 // GET /api/v1/admin/proxies/all
 // Optional query param: with_count=true to include account count per proxy
 func (h *ProxyHandler) GetAll(c *gin.Context) {
+	c.Header("Cache-Control", "no-store")
 	if h.scopedAdminProxyRead(c) {
 		return
 	}
@@ -124,6 +126,7 @@ func (h *ProxyHandler) GetAll(c *gin.Context) {
 // GetByID handles getting a proxy by ID
 // GET /api/v1/admin/proxies/:id
 func (h *ProxyHandler) GetByID(c *gin.Context) {
+	c.Header("Cache-Control", "no-store")
 	if h.scopedAdminProxyRead(c) {
 		return
 	}
@@ -145,6 +148,7 @@ func (h *ProxyHandler) GetByID(c *gin.Context) {
 // Create handles creating a new proxy
 // POST /api/v1/admin/proxies
 func (h *ProxyHandler) Create(c *gin.Context) {
+	c.Header("Cache-Control", "no-store")
 	var req CreateProxyRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		response.BadRequest(c, "Invalid request: "+err.Error())
@@ -179,6 +183,7 @@ func (h *ProxyHandler) Create(c *gin.Context) {
 // Update handles updating a proxy
 // PUT /api/v1/admin/proxies/:id
 func (h *ProxyHandler) Update(c *gin.Context) {
+	c.Header("Cache-Control", "no-store")
 	proxyID, err := strconv.ParseInt(c.Param("id"), 10, 64)
 	if err != nil {
 		response.BadRequest(c, "Invalid proxy ID")

@@ -19,7 +19,7 @@ func (s *OpenAIGatewayService) doOpenAIUpstream(request *http.Request, proxyURL 
 			return response, err
 		}
 	}
-	if p, ok := s.httpUpstream.(workerWebSocketProvider); ok && p.WorkerWebSocketRoute() != nil && s.workerTLSProfiles != nil && account.IsTLSFingerprintEnabled() {
+	if s.workerTLSProfiles != nil && account.IsTLSFingerprintEnabled() {
 		return s.httpUpstream.DoWithTLS(request, proxyURL, account.ID, account.Concurrency, s.workerTLSProfiles.ResolveTLSProfile(account))
 	}
 	return s.httpUpstream.Do(request, proxyURL, account.ID, account.Concurrency)
@@ -39,7 +39,7 @@ func (s *AccountTestService) doOpenAIAccountTestUpstream(
 			return response, err
 		}
 	}
-	if useTLSFallback {
+	if useTLSFallback || account.IsTLSFingerprintEnabled() && s.tlsFPProfileService != nil {
 		return s.httpUpstream.DoWithTLS(
 			request,
 			proxyURL,

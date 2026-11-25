@@ -176,7 +176,23 @@
           </template>
 
           <template #cell-auth="{ row }">
-            <span v-if="row.has_credentials" class="font-mono text-gray-500">••••••</span>
+            <div v-if="row.username || row.password" class="flex items-center gap-1.5">
+              <div class="flex flex-col text-xs">
+                <span v-if="row.username" class="text-gray-700">{{ row.username }}</span>
+                <span v-if="row.password" class="font-mono text-gray-500">
+                  {{ visiblePasswordIds.has(row.id) ? row.password : '••••••' }}
+                </span>
+              </div>
+              <button
+                v-if="row.password"
+                type="button"
+                class="ml-1 rounded p-0.5 text-gray-400 hover:text-gray-600"
+                :aria-label="t(visiblePasswordIds.has(row.id) ? 'admin.proxies.hidePassword' : 'admin.proxies.showPassword')"
+                @click.stop="visiblePasswordIds.has(row.id) ? visiblePasswordIds.delete(row.id) : visiblePasswordIds.add(row.id)"
+              >
+                <Icon :name="visiblePasswordIds.has(row.id) ? 'eyeOff' : 'eye'" size="sm" />
+              </button>
+            </div>
             <span v-else class="text-sm text-gray-400">-</span>
           </template>
 
@@ -1063,6 +1079,7 @@ const editStatusOptions = computed(() => [
 ])
 
 const proxies = ref<Proxy[]>([])
+const visiblePasswordIds = reactive(new Set<number>())
 const editUsernameDirty = ref(false)
 const copyMenuProxyId = ref<number | null>(null)
 const loading = ref(false)
@@ -1446,8 +1463,8 @@ const handleEdit = (proxy: Proxy) => {
   editForm.host = proxy.host
   editForm.port = proxy.port
   editUsernameDirty.value = false
-  editForm.username = ''
-  editForm.password = ''
+  editForm.username = proxy.username || ''
+  editForm.password = proxy.password || ''
   editForm.status = proxy.status === 'expired' ? 'inactive' : proxy.status
   editForm.expires_at = proxy.expires_at ? proxy.expires_at.slice(0, 10) : ''
   editForm.fallback_mode = proxy.fallback_mode || 'none'
@@ -2061,11 +2078,17 @@ function proxyAddress(row: Proxy): string {
 }
 
 function buildProxyUrl(row: Proxy): string {
-  return `${row.protocol}://${proxyAddress(row)}`
+  const username = row.username ? encodeURIComponent(row.username) : ''
+  const password = row.password ? encodeURIComponent(row.password) : ''
+  const auth = password ? `${username}:${password}@` : username ? `${username}@` : ''
+  return `${row.protocol}://${auth}${proxyAddress(row)}`
 }
 
 function getCopyFormats(row: Proxy) {
-  return [buildProxyUrl(row), proxyAddress(row)].map(value => ({ label: value, value }))
+  const url = buildProxyUrl(row)
+  const values = row.username || row.password ? [url, url.slice(url.indexOf('://') + 3)] : [url]
+  values.push(proxyAddress(row))
+  return values.map(value => ({ label: value, value }))
 }
 
 function copyProxyUrl(row: Proxy) {

@@ -9,9 +9,15 @@ import (
 // WorkerWebSocketRoute is an immutable pool snapshot. An established tunnel
 // owns its snapshot until Close; subsequent handshakes observe reloads.
 type WorkerWebSocketRoute interface {
-	RoundTripWebSocket(*http.Request, string) (*http.Response, error)
+	RoundTripWebSocket(*http.Request, string, int64) (*http.Response, error)
 }
 type workerWebSocketProvider interface{ WorkerWebSocketRoute() WorkerWebSocketRoute }
+
+type workerWebSocketAccountKey struct{}
+
+func WithWorkerWebSocketAccount(ctx context.Context, accountID int64) context.Context {
+	return context.WithValue(ctx, workerWebSocketAccountKey{}, accountID)
+}
 
 var ErrWorkerWebSocketLocalFallback = errors.New("worker did not accept websocket handshake")
 
@@ -40,7 +46,8 @@ func (d *DistributedOpenAIWSDialer) Dial(ctx context.Context, target string, h h
 }
 func (d *DistributedOpenAIWSDialer) dialRoute(ctx context.Context, target string, h http.Header, proxy string, route WorkerWebSocketRoute) (openAIWSClientConn, int, http.Header, error) {
 	if route != nil && DistributedHTTPUpstreamEnabled(ctx) {
-		client := &http.Client{Transport: websocketRoundTrip(func(r *http.Request) (*http.Response, error) { return route.RoundTripWebSocket(r, proxy) }), CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+		accountID, _ := ctx.Value(workerWebSocketAccountKey{}).(int64)
+		client := &http.Client{Transport: websocketRoundTrip(func(r *http.Request) (*http.Response, error) { return route.RoundTripWebSocket(r, proxy, accountID) }), CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 		conn, status, headers, err := d.local.dial(ctx, target, h, "", client)
 		if !errors.Is(err, ErrWorkerWebSocketLocalFallback) {
 			return conn, status, headers, err

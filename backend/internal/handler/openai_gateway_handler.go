@@ -900,25 +900,8 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 			})
 		}
 		if err != nil {
-			var relayErr *service.HTTPUpstreamRelayError
-			if errors.As(err, &relayErr) && relayErr.IsTerminal() {
+			if handleOpenAIRelayFailure(c, err, result, reqStream, streamStarted, reqLog, h.handleStreamingAwareError) {
 				submitResponsesUsage(result)
-				if (result != nil && result.ClientDisconnect) || failoverClientGone(c) {
-					return
-				}
-				reqLog.Warn("openai.worker_attempt_terminated", zap.Bool("unsent", relayErr.Unsent), zap.Uint8("origin", uint8(relayErr.Origin)))
-				if c.Writer.Written() && !reqStream {
-					return
-				}
-				streamStarted = streamStarted || c.Writer.Written()
-				if relayErr.Unsent {
-					h.handleStreamingAwareError(c, http.StatusServiceUnavailable, "worker_unavailable", "Worker route is unavailable", streamStarted)
-				} else {
-					if !streamStarted {
-						c.Header("x-should-retry", "false")
-					}
-					h.handleStreamingAwareError(c, http.StatusBadGateway, "upstream_outcome_unknown", "Upstream request may already have been processed", streamStarted)
-				}
 				return
 			}
 			if result != nil && result.ClientDisconnect {
@@ -1518,6 +1501,10 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 			})
 		}
 		if err != nil {
+			if handleOpenAIRelayFailure(c, err, result, reqStream, streamStarted, reqLog, h.anthropicStreamingAwareError) {
+				submitMessagesUsage(result)
+				return
+			}
 			if result != nil && result.ImageCount > 0 {
 				reqLog.Warn("openai_messages.forward_partial_error_with_image_result",
 					zap.Int64("account_id", account.ID),
@@ -1648,6 +1635,30 @@ func resolveOpenAIMessagesMetadataSession(c *gin.Context, sessionHash, promptCac
 		sessionHash = service.DeriveSessionHashFromSeed(seed)
 	}
 	return sessionHash, promptCacheKey
+}
+
+// handleOpenAIRelayFailure stops relay faults before account failover or health reporting.
+func handleOpenAIRelayFailure(c *gin.Context, err error, result *service.OpenAIForwardResult, stream, streamStarted bool, reqLog *zap.Logger, write func(*gin.Context, int, string, string, bool)) bool {
+	status, code, message, ok := relayFailureResponse(err)
+	if !ok {
+		return false
+	}
+	if (result != nil && result.ClientDisconnect) || failoverClientGone(c) {
+		return true
+	}
+	reqLog.Warn("openai.worker_attempt_terminated", zap.String("code", code))
+	if service.StopOpenAICompactSSEKeepaliveCommitted(c) {
+		streamStarted = true
+	}
+	if c.Writer.Written() && !stream {
+		return true
+	}
+	streamStarted = streamStarted || c.Writer.Written()
+	if status == http.StatusBadGateway && !streamStarted {
+		c.Header("x-should-retry", "false")
+	}
+	write(c, status, code, message, streamStarted)
+	return true
 }
 
 // anthropicErrorResponse writes an error in Anthropic Messages API format.

@@ -14,6 +14,7 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/httputil"
+	middleware2 "github.com/Wei-Shaw/sub2api/internal/server/middleware"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
@@ -98,6 +99,71 @@ func TestResponsesWorkerUnknownHeadersNeverSwitchOrCool(t *testing.T) {
 	require.Equal(t, http.StatusBadGateway, rec.Code)
 	require.Contains(t, rec.Body.String(), "upstream_outcome_unknown")
 	require.Equal(t, "false", rec.Header().Get("x-should-retry"))
+}
+
+func TestChatAndMessagesWorkerFailuresDoNotRetry(t *testing.T) {
+	for _, endpoint := range []struct {
+		path string
+		call func(*OpenAIGatewayHandler, *gin.Context)
+	}{
+		{"/v1/chat/completions", (*OpenAIGatewayHandler).ChatCompletions},
+		{"/v1/messages", (*OpenAIGatewayHandler).Messages},
+	} {
+		t.Run(endpoint.path, func(t *testing.T) {
+			for _, unsent := range []bool{true, false} {
+				var attempts []int64
+				h, accounts, usage := responsesWorkerTestHandler(t, responsesWorkerTestTransport{do: func(_ *http.Request, id int64) (*http.Response, error) {
+					attempts = append(attempts, id)
+					return nil, &service.HTTPUpstreamRelayError{Origin: service.HTTPUpstreamRelayLink, Unsent: unsent}
+				}}, 0)
+				c, rec := newOpenAIResponsesFailoverTestContext(t, t.Context())
+				key, _ := middleware2.GetAPIKeyFromContext(c)
+				key.Group.AllowMessagesDispatch = true
+				body := `{"model":"gpt-5.1","stream":false,"max_tokens":16,"messages":[{"role":"user","content":"hello"}]}`
+				c.Request.URL.Path = endpoint.path
+				c.Request.Body = io.NopCloser(strings.NewReader(body))
+				c.Request.ContentLength = int64(len(body))
+				endpoint.call(h, c)
+				require.Equal(t, []int64{1}, attempts, rec.Body.String())
+				require.Zero(t, accounts.cooldowns)
+				require.Empty(t, usage)
+				if unsent {
+					require.Equal(t, 503, rec.Code)
+					require.Empty(t, rec.Header().Get("x-should-retry"))
+					require.Contains(t, rec.Body.String(), "worker_unavailable")
+				} else {
+					require.Equal(t, 502, rec.Code)
+					require.Equal(t, "false", rec.Header().Get("x-should-retry"))
+					require.Contains(t, rec.Body.String(), "upstream_outcome_unknown")
+				}
+			}
+		})
+	}
+}
+
+func TestGeminiWorkerFailureWritesGoogleError(t *testing.T) {
+	for _, unsent := range []bool{true, false} {
+		c, rec := newOpenAIResponsesFailoverTestContext(t, t.Context())
+		require.True(t, writeGeminiRelayFailure(c, &service.HTTPUpstreamRelayError{Origin: service.HTTPUpstreamRelayWorker, Unsent: unsent}))
+		require.Contains(t, rec.Body.String(), `"error":{`)
+		if unsent {
+			require.Equal(t, 503, rec.Code)
+		} else {
+			require.Equal(t, 502, rec.Code)
+			require.Equal(t, "false", rec.Header().Get("x-should-retry"))
+		}
+	}
+}
+
+func TestGeminiWorkerFailureAfterHeartbeatWritesSSEError(t *testing.T) {
+	c, rec := newOpenAIResponsesFailoverTestContext(t, t.Context())
+	c.Header("Content-Type", "text/event-stream")
+	_, _ = c.Writer.WriteString(": ping\n\n")
+	c.Writer.Flush()
+	require.True(t, writeGeminiRelayFailure(c, &service.HTTPUpstreamRelayError{Origin: service.HTTPUpstreamRelayLink}))
+	require.Equal(t, 200, rec.Code)
+	require.Contains(t, rec.Body.String(), "event:error")
+	require.Contains(t, rec.Body.String(), "Upstream request may already have been processed")
 }
 
 func TestResponsesWorkerDrainAfterClientDisconnect(t *testing.T) {

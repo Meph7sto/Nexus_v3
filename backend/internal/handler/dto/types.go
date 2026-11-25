@@ -496,7 +496,12 @@ type ProxyWithAccountCount struct {
 	QualityChecked *int64 `json:"quality_checked,omitempty"`
 }
 
-type AdminProxy struct{ Proxy }
+// AdminProxy is for authorized proxy administrators, not ordinary API responses.
+type AdminProxy struct {
+	Proxy
+	Username string `json:"username"`
+	Password string `json:"password,omitempty"`
+}
 
 // AdminProxyWithAccountCount 是管理员接口使用的带账号统计的 proxy DTO。
 type AdminProxyWithAccountCount struct {

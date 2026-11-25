@@ -14,6 +14,7 @@ import (
 
 // ExportData exports proxy-only data for migration.
 func (h *ProxyHandler) ExportData(c *gin.Context) {
+	c.Header("Cache-Control", "no-store")
 	ctx := c.Request.Context()
 
 	selectedIDs, err := parseProxyIDs(c)
@@ -55,7 +56,7 @@ func (h *ProxyHandler) ExportData(c *gin.Context) {
 	dataProxies := make([]DataProxy, 0, len(proxies))
 	for i := range proxies {
 		p := proxies[i]
-		key := exportProxyKey(p)
+		key := buildProxyKey(p.Protocol, p.Host, p.Port, p.Username, p.Password)
 
 		var expiresAt *int64
 		if p.ExpiresAt != nil {
@@ -67,17 +68,18 @@ func (h *ProxyHandler) ExportData(c *gin.Context) {
 			backupProxyName = proxyNameByID[*p.BackupProxyID]
 		}
 		dataProxies = append(dataProxies, DataProxy{
-			ProxyKey:            key,
-			Name:                p.Name,
-			Protocol:            p.Protocol,
-			Host:                p.Host,
-			Port:                p.Port,
-			CredentialsRequired: p.Username != "" || p.Password != "",
-			Status:              p.Status,
-			ExpiresAt:           expiresAt,
-			FallbackMode:        p.FallbackMode,
-			BackupProxyName:     backupProxyName,
-			ExpiryWarnDays:      p.ExpiryWarnDays,
+			ProxyKey:        key,
+			Name:            p.Name,
+			Protocol:        p.Protocol,
+			Host:            p.Host,
+			Port:            p.Port,
+			Username:        p.Username,
+			Password:        p.Password,
+			Status:          p.Status,
+			ExpiresAt:       expiresAt,
+			FallbackMode:    p.FallbackMode,
+			BackupProxyName: backupProxyName,
+			ExpiryWarnDays:  p.ExpiryWarnDays,
 		})
 	}
 

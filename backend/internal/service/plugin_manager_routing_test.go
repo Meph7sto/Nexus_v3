@@ -105,6 +105,26 @@ func TestOpenAIGatewayPluginRoutingPreservesAPIKeyAndFailsClosedForOAuth(t *test
 	assert.Equal(t, 1, upstream.doCalls)
 }
 
+func TestOpenAIExplicitTLSFingerprintWithoutWorkerPool(t *testing.T) {
+	transport := &pluginRoutingHTTPUpstream{}
+	gateway := &OpenAIGatewayService{httpUpstream: transport}
+	gateway.SetWorkerTLSProfiles(&TLSFingerprintProfileService{})
+	account := &Account{ID: 7, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Extra: map[string]any{"enable_tls_fingerprint": true}}
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "https://chatgpt.com", nil)
+	require.NoError(t, err)
+	resp, err := gateway.doOpenAIUpstream(req, "", account)
+	require.NoError(t, err)
+	_ = resp.Body.Close()
+	require.Equal(t, 1, transport.doWithTLSCalls)
+
+	account.Extra["enable_tls_fingerprint"] = false
+	resp, err = gateway.doOpenAIUpstream(req, "", account)
+	require.NoError(t, err)
+	_ = resp.Body.Close()
+	require.Equal(t, 1, transport.doWithTLSCalls)
+	require.Equal(t, 2, transport.doCalls)
+}
+
 func TestStablePluginBucketIsDeterministicAndBounded(t *testing.T) {
 	for id := int64(1); id <= 1000; id++ {
 		first := stablePluginBucket(id)
