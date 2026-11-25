@@ -54,13 +54,10 @@ type OpsMetricsCollector struct {
 	db          *sql.DB
 	redisClient *redis.Client
 	instanceID  string
+	worker      sharedTaskRunner
 
 	lastCgroupCPUUsageNanos uint64
 	lastCgroupCPUSampleAt   time.Time
-
-	stopCh    chan struct{}
-	startOnce sync.Once
-	stopOnce  sync.Once
 
 	skipLogMu sync.Mutex
 	skipLogAt time.Time
@@ -88,53 +85,32 @@ func NewOpsMetricsCollector(
 }
 
 func (c *OpsMetricsCollector) Start() {
-	if c == nil {
-		return
+	if c != nil {
+		c.worker.start(context.Background(), c.runShared)
 	}
-	c.startOnce.Do(func() {
-		if c.stopCh == nil {
-			c.stopCh = make(chan struct{})
-		}
-		go c.run()
-	})
 }
 
 func (c *OpsMetricsCollector) Stop() {
-	if c == nil {
-		return
-	}
-	c.stopOnce.Do(func() {
-		if c.stopCh != nil {
-			close(c.stopCh)
-		}
-	})
-}
-
-func (c *OpsMetricsCollector) run() {
-	// First run immediately so the dashboard has data soon after startup.
-	c.collectOnce()
-
-	for {
-		interval := c.getInterval()
-		timer := time.NewTimer(interval)
-		select {
-		case <-timer.C:
-			c.collectOnce()
-		case <-c.stopCh:
-			timer.Stop()
-			return
-		}
+	if c != nil {
+		c.worker.stop()
 	}
 }
 
-func (c *OpsMetricsCollector) getInterval() time.Duration {
+func (c *OpsMetricsCollector) runShared(ctx context.Context) {
+	for ctx.Err() == nil {
+		c.collectOnce(ctx)
+		sleepOrDone(ctx, c.getInterval(ctx))
+	}
+}
+
+func (c *OpsMetricsCollector) getInterval(parent context.Context) time.Duration {
 	interval := opsMetricsCollectorMinInterval
 
 	if c.settingRepo == nil {
 		return interval
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(parent, 2*time.Second)
 	defer cancel()
 
 	raw, err := c.settingRepo.GetValue(ctx, SettingKeyOpsMetricsIntervalSeconds)
@@ -159,7 +135,7 @@ func (c *OpsMetricsCollector) getInterval() time.Duration {
 	return time.Duration(seconds) * time.Second
 }
 
-func (c *OpsMetricsCollector) collectOnce() {
+func (c *OpsMetricsCollector) collectOnce(parent context.Context) {
 	if c == nil {
 		return
 	}
@@ -173,7 +149,7 @@ func (c *OpsMetricsCollector) collectOnce() {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), opsMetricsCollectorTimeout)
+	ctx, cancel := context.WithTimeout(parent, opsMetricsCollectorTimeout)
 	defer cancel()
 
 	if !c.isMonitoringEnabled(ctx) {
@@ -199,7 +175,7 @@ func (c *OpsMetricsCollector) collectOnce() {
 	if err != nil {
 		msg := truncateString(err.Error(), 2048)
 		errAt := finishedAt
-		hbCtx, hbCancel := context.WithTimeout(context.Background(), opsMetricsCollectorHeartbeatTimeout)
+		hbCtx, hbCancel := context.WithTimeout(parent, opsMetricsCollectorHeartbeatTimeout)
 		defer hbCancel()
 		_ = c.opsRepo.UpsertJobHeartbeat(hbCtx, &OpsUpsertJobHeartbeatInput{
 			JobName:        opsMetricsCollectorJobName,
@@ -213,7 +189,7 @@ func (c *OpsMetricsCollector) collectOnce() {
 	}
 
 	successAt := finishedAt
-	hbCtx, hbCancel := context.WithTimeout(context.Background(), opsMetricsCollectorHeartbeatTimeout)
+	hbCtx, hbCancel := context.WithTimeout(parent, opsMetricsCollectorHeartbeatTimeout)
 	defer hbCancel()
 	_ = c.opsRepo.UpsertJobHeartbeat(hbCtx, &OpsUpsertJobHeartbeatInput{
 		JobName:        opsMetricsCollectorJobName,

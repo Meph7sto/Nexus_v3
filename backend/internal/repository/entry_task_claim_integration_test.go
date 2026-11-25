@@ -42,6 +42,10 @@ func TestEntryTaskClaimPostgresHandoff(t *testing.T) {
 	require.NoError(t, err)
 	_, err = db.ExecContext(ctx, string(claimMigration))
 	require.NoError(t, err)
+	leaseMigration, err := migrations.FS.ReadFile("256_entry_shared_task_lease.sql")
+	require.NoError(t, err)
+	_, err = db.ExecContext(ctx, string(leaseMigration))
+	require.NoError(t, err)
 	_, err = db.ExecContext(ctx, `CREATE TABLE scheduled_test_plans (
 		id BIGINT PRIMARY KEY, enabled BOOLEAN, last_run_at TIMESTAMPTZ,
 		next_run_at TIMESTAMPTZ, updated_at TIMESTAMPTZ
@@ -55,12 +59,16 @@ func TestEntryTaskClaimPostgresHandoff(t *testing.T) {
 	}
 	first, err := service.ProvideSharedTaskGate(ctrl("control-a"), db)
 	require.NoError(t, err)
-	require.True(t, first.Running())
+	t.Cleanup(first.Stop)
+	first.Begin()
+	require.Eventually(t, first.Running, 3*time.Second, 5*time.Millisecond)
 	second, err := service.ProvideSharedTaskGate(ctrl("control-b"), db)
 	require.NoError(t, err)
-	require.False(t, second.Running())
+	t.Cleanup(second.Stop)
+	second.Begin()
+	require.Never(t, second.Running, 100*time.Millisecond, 5*time.Millisecond)
 	_, err = service.ProvideSharedTaskGate(&config.Config{}, db)
-	require.ErrorContains(t, err, "prior clustered Entry task claim")
+	require.ErrorContains(t, err, "prior clustered Entry task lease")
 
 	now := time.Now().UTC().Truncate(time.Second)
 	due := now.Add(-time.Minute)
@@ -73,17 +81,7 @@ func TestEntryTaskClaimPostgresHandoff(t *testing.T) {
 	require.True(t, claimed)
 
 	first.Stop()
-	restart, err := service.ProvideSharedTaskGate(ctrl("control-a"), db)
-	require.NoError(t, err)
-	require.False(t, restart.Running(), "a same-ID restart cannot silently take over a prior process claim")
-
-	var token string
-	require.NoError(t, db.QueryRowContext(ctx, "SELECT process_token FROM entry_shared_task_claim WHERE entry_id = $1", "control-a").Scan(&token))
-	_, err = db.ExecContext(ctx, "DELETE FROM entry_shared_task_claim WHERE entry_id = $1 AND process_token = $2", "control-a", token)
-	require.NoError(t, err)
-	replacement, err := service.ProvideSharedTaskGate(ctrl("control-b"), db)
-	require.NoError(t, err)
-	require.True(t, replacement.Running())
+	require.Eventually(t, second.Running, 4*time.Second, 10*time.Millisecond)
 	claimed, err = plans.ClaimDue(ctx, 1, due, now.Add(time.Minute), next)
 	require.NoError(t, err)
 	require.False(t, claimed, "the replacement cannot consume a stale occurrence")

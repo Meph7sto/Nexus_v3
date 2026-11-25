@@ -70,11 +70,7 @@ type TokenRefreshService struct {
 	privacyClientFactory PrivacyClientFactory
 	proxyRepo            ProxyRepository
 
-	stopCh        chan struct{}
-	stopOnce      sync.Once
-	wg            sync.WaitGroup
-	runCtx        context.Context
-	runCancel     context.CancelFunc
+	worker        sharedTaskRunner
 	candidateMu   sync.Mutex
 	afterID       int64
 	providerMu    sync.Mutex
@@ -102,7 +98,6 @@ func NewTokenRefreshService(
 	if cfg != nil {
 		refreshCfg = &cfg.TokenRefresh
 	}
-	runCtx, runCancel := context.WithCancel(context.Background())
 	s := &TokenRefreshService{
 		accountRepo:      accountRepo,
 		refreshPolicy:    DefaultBackgroundRefreshPolicy(),
@@ -110,9 +105,6 @@ func NewTokenRefreshService(
 		cacheInvalidator: cacheInvalidator,
 		schedulerCache:   schedulerCache,
 		tempUnschedCache: tempUnschedCache,
-		stopCh:           make(chan struct{}),
-		runCtx:           runCtx,
-		runCancel:        runCancel,
 	}
 	if pager, ok := accountRepo.(OAuthRefreshCandidatePager); ok {
 		s.candidatePager = pager
@@ -200,39 +192,20 @@ func (s *TokenRefreshService) notifyAccountSchedulingBlockCleared(accountID int6
 
 // Start 启动后台刷新服务
 func (s *TokenRefreshService) Start() {
+	s.worker.start(context.Background(), s.runShared)
+}
+
+func (s *TokenRefreshService) runShared(ctx context.Context) {
 	if s.cfg == nil || !s.cfg.Enabled {
 		slog.Info("token_refresh.service_disabled")
 		return
 	}
 
-	s.wg.Add(1)
-	go s.refreshLoop()
-
 	slog.Info("token_refresh.service_started",
 		"check_interval_minutes", s.cfg.CheckIntervalMinutes,
 		"refresh_before_expiry_hours", s.cfg.RefreshBeforeExpiryHours,
 	)
-}
-
-// Stop 停止刷新服务（可安全多次调用）
-func (s *TokenRefreshService) Stop() {
-	s.stopOnce.Do(func() {
-		if s.runCancel != nil {
-			s.runCancel()
-		}
-		close(s.stopCh)
-	})
-	s.wg.Wait()
-	slog.Info("token_refresh.service_stopped")
-}
-
-// refreshLoop 刷新循环
-func (s *TokenRefreshService) refreshLoop() {
-	defer s.wg.Done()
-	ctx := s.runCtx
-	if ctx == nil {
-		ctx = context.Background()
-	}
+	defer slog.Info("token_refresh.service_stopped")
 
 	// 计算检查间隔
 	checkInterval := time.Duration(s.cfg.CheckIntervalMinutes) * time.Minute
@@ -240,22 +213,12 @@ func (s *TokenRefreshService) refreshLoop() {
 		checkInterval = 5 * time.Minute
 	}
 
-	ticker := time.NewTicker(checkInterval)
-	defer ticker.Stop()
+	runSharedPeriodic(ctx, checkInterval, true, s.processRefreshContext)
+}
 
-	// 启动时立即执行一次检查
-	s.processRefreshContext(ctx)
-
-	for {
-		select {
-		case <-ticker.C:
-			s.processRefreshContext(ctx)
-		case <-ctx.Done():
-			return
-		case <-s.stopCh:
-			return
-		}
-	}
+// Stop stops a directly started refresh loop.
+func (s *TokenRefreshService) Stop() {
+	s.worker.stop()
 }
 
 type tokenRefreshPageStats struct {

@@ -7,6 +7,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/Wei-Shaw/sub2api/internal/config"
 )
 
 var (
@@ -134,6 +136,65 @@ func TestOpsRuntimeSettingsBackgroundRefreshConverges(t *testing.T) {
 			sink.persistAccessLogs.Load() &&
 			svc.RuntimeSettingsRefreshHealth().SuccessTotal > 0
 	})
+}
+
+func TestOpsRuntimeSettingsRefreshReloadsOwnerCleanupSchedule(t *testing.T) {
+	ctx := t.Context()
+	repo := newRuntimeSettingRepoStub()
+	cfg := &config.Config{}
+	cfg.Ops.Cleanup.Schedule = "0 0 1 3 *"
+	owner := &OpsService{settingRepo: repo, cfg: cfg}
+	standby := &OpsService{settingRepo: repo, cfg: cfg}
+	owner.initRuntimeSettings(ctx)
+	standby.initRuntimeSettings(ctx)
+	epoch, endEpoch := context.WithCancel(ctx)
+	ownerCleanup := &OpsCleanupService{settingRepo: repo, cfg: cfg, epochCtx: epoch, epochStop: endEpoch}
+	t.Cleanup(ownerCleanup.Stop)
+	if err := ownerCleanup.Reload(ctx); err != nil {
+		t.Fatalf("start with configured cleanup schedule: %v", err)
+	}
+	standbyCleanup := &OpsCleanupService{settingRepo: repo}
+	owner.SetCleanupReloader(ownerCleanup)
+	standby.SetCleanupReloader(standbyCleanup)
+
+	update := func(enabled bool, schedule string, retentionDays int) {
+		t.Helper()
+		cfg := defaultOpsAdvancedSettings()
+		cfg.DataRetention.CleanupEnabled = enabled
+		cfg.DataRetention.CleanupSchedule = schedule
+		cfg.DataRetention.ErrorLogRetentionDays = retentionDays
+		if _, err := standby.UpdateOpsAdvancedSettings(ctx, cfg); err != nil {
+			t.Fatalf("update on standby: %v", err)
+		}
+		if standbyCleanup.cron != nil {
+			t.Fatal("standby should not start a cleanup scheduler")
+		}
+		if err := owner.RefreshRuntimeSettings(ctx); err != nil {
+			t.Fatalf("refresh on owner: %v", err)
+		}
+	}
+
+	update(false, opsCleanupDefaultSchedule, 30)
+	if ownerCleanup.snapshotEffective().Schedule != opsCleanupDefaultSchedule {
+		t.Fatal("a saved default schedule should replace the differently configured schedule")
+	}
+	update(true, "0 0 1 1 *", 30)
+	first := ownerCleanup.cron
+	if first == nil || ownerCleanup.snapshotEffective().Schedule != "0 0 1 1 *" {
+		t.Fatal("owner did not start cleanup with the schedule written on standby")
+	}
+	update(true, "0 0 1 1 *", 7)
+	if ownerCleanup.cron != first {
+		t.Fatal("a retention-only update restarted the scheduler")
+	}
+	update(true, "0 0 1 2 *", 7)
+	if ownerCleanup.cron == nil || ownerCleanup.cron == first || ownerCleanup.snapshotEffective().Schedule != "0 0 1 2 *" {
+		t.Fatal("owner did not replace the old schedule")
+	}
+	update(false, "0 0 1 2 *", 7)
+	if ownerCleanup.cron != nil {
+		t.Fatal("owner's scheduler was not stopped by the standby update")
+	}
 }
 
 func TestOpsRuntimeSettingsRefreshUsesSafeAccessLogDefault(t *testing.T) {

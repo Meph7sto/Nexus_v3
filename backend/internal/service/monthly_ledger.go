@@ -167,11 +167,9 @@ type MonthlyLedgerRepository interface {
 
 type MonthlyLedgerService struct {
 	emailSend     func(context.Context, NotificationEmailSendInput) error
-	incomeCancel  context.CancelFunc
-	incomeDone    chan struct{}
+	incomeWorker  sharedTaskRunner
 	emailSettings SettingRepository
-	emailCancel   context.CancelFunc
-	emailDone     chan struct{}
+	emailWorker   sharedTaskRunner
 	repo          MonthlyLedgerRepository
 	now           func() time.Time
 	location      *time.Location

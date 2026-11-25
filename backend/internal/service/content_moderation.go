@@ -626,7 +626,7 @@ func ProvideContentModerationService(
 		for i := 0; i < svc.workerCount; i++ {
 			go svc.worker(i)
 		}
-		tasks.Start(func() { go svc.cleanupWorker() })
+		tasks.Register(svc.cleanupWorker)
 	}
 	return svc
 }
@@ -1495,21 +1495,28 @@ func (s *ContentModerationService) GetStatus(ctx context.Context) (*ContentModer
 	}, nil
 }
 
-func (s *ContentModerationService) cleanupWorker() {
+func (s *ContentModerationService) cleanupWorker(ctx context.Context) {
 	timer := time.NewTimer(contentModerationCleanupDelay)
 	defer timer.Stop()
 	for {
-		<-timer.C
-		s.runCleanupOnce()
+		select {
+		case <-ctx.Done():
+			return
+		case <-timer.C:
+			if ctx.Err() != nil {
+				return
+			}
+		}
+		s.runCleanupOnce(ctx)
 		timer.Reset(contentModerationCleanupInterval)
 	}
 }
 
-func (s *ContentModerationService) runCleanupOnce() {
+func (s *ContentModerationService) runCleanupOnce(parent context.Context) {
 	if s == nil || s.repo == nil || s.settingRepo == nil {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), contentModerationCleanupTimeout)
+	ctx, cancel := context.WithTimeout(parent, contentModerationCleanupTimeout)
 	defer cancel()
 	cfg, err := s.loadConfig(ctx)
 	if err != nil {

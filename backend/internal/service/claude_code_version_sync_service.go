@@ -5,7 +5,6 @@ import (
 	"errors"
 	"log/slog"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -35,9 +34,7 @@ type ClaudeCodeVersionSyncService struct {
 	settingService *SettingService
 	githubClient   GitHubReleaseClient
 	interval       time.Duration
-	stopCh         chan struct{}
-	stopOnce       sync.Once
-	wg             sync.WaitGroup
+	worker         sharedTaskRunner
 }
 
 func NewClaudeCodeVersionSyncService(
@@ -51,60 +48,51 @@ func NewClaudeCodeVersionSyncService(
 		settingService: settingService,
 		githubClient:   githubClient,
 		interval:       interval,
-		stopCh:         make(chan struct{}),
 	}
 }
 
 func (s *ClaudeCodeVersionSyncService) Start() {
-	if s == nil || s.settingRepo == nil || s.githubClient == nil || s.interval <= 0 {
-		return
+	if s != nil {
+		s.worker.start(context.Background(), s.runShared)
 	}
-	s.wg.Add(1)
-	go func() {
-		defer s.wg.Done()
-		ticker := time.NewTicker(s.interval)
-		defer ticker.Stop()
-
-		s.runInitial()
-		for {
-			select {
-			case <-ticker.C:
-				s.runOnce()
-			case <-s.stopCh:
-				return
-			}
-		}
-	}()
 }
 
 func (s *ClaudeCodeVersionSyncService) Stop() {
-	if s == nil {
+	if s != nil {
+		s.worker.stop()
+	}
+}
+
+func (s *ClaudeCodeVersionSyncService) runShared(ctx context.Context) {
+	if s == nil || s.settingRepo == nil || s.githubClient == nil || s.interval <= 0 {
 		return
 	}
-	s.stopOnce.Do(func() {
-		close(s.stopCh)
-	})
-	s.wg.Wait()
+	s.runInitialContext(ctx)
+	runSharedPeriodic(ctx, s.interval, false, s.runOnceContext)
 }
 
 // runInitial 执行启动时的首次同步。若同步值在一个同步周期内已被刷新过则跳过：
 // 频繁重启、滚动发布或崩溃重启会让「启动即同步」放大成对 GitHub 的连续请求，
 // 而同步间隔只有 1 小时，重启后没有立刻重新拉取的必要。
 func (s *ClaudeCodeVersionSyncService) runInitial() {
-	if s.syncedWithinInterval() {
+	s.runInitialContext(context.Background())
+}
+
+func (s *ClaudeCodeVersionSyncService) runInitialContext(ctx context.Context) {
+	if s.syncedWithinInterval(ctx) {
 		return
 	}
-	s.runOnce()
+	s.runOnceContext(ctx)
 }
 
 // syncedWithinInterval 判断已同步值是否仍在一个同步周期内。
 // 借设置行自身的 UpdatedAt 判断，无需额外记录时间戳的设置项。
 // 读取失败或尚无有效同步值时返回 false，让启动同步照常执行。
-func (s *ClaudeCodeVersionSyncService) syncedWithinInterval() bool {
+func (s *ClaudeCodeVersionSyncService) syncedWithinInterval(parent context.Context) bool {
 	if s.interval <= 0 {
 		return false
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), claudeCodeVersionSyncTimeout)
+	ctx, cancel := context.WithTimeout(parent, claudeCodeVersionSyncTimeout)
 	defer cancel()
 
 	setting, err := s.settingRepo.Get(ctx, SettingKeyClaudeCodeClientVersionSynced)
@@ -118,7 +106,11 @@ func (s *ClaudeCodeVersionSyncService) syncedWithinInterval() bool {
 }
 
 func (s *ClaudeCodeVersionSyncService) runOnce() {
-	ctx, cancel := context.WithTimeout(context.Background(), claudeCodeVersionSyncTimeout)
+	s.runOnceContext(context.Background())
+}
+
+func (s *ClaudeCodeVersionSyncService) runOnceContext(parent context.Context) {
+	ctx, cancel := context.WithTimeout(parent, claudeCodeVersionSyncTimeout)
 	defer cancel()
 
 	if !s.autoSyncEnabled(ctx) {

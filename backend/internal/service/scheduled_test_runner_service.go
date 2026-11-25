@@ -20,9 +20,7 @@ type ScheduledTestRunnerService struct {
 	rateLimitSvc   *RateLimitService
 	cfg            *config.Config
 
-	cron      *cron.Cron
-	startOnce sync.Once
-	stopOnce  sync.Once
+	worker sharedTaskRunner
 }
 
 // NewScheduledTestRunnerService creates a new runner.
@@ -44,55 +42,53 @@ func NewScheduledTestRunnerService(
 
 // Start begins the cron ticker (every minute).
 func (s *ScheduledTestRunnerService) Start() {
-	if s == nil {
+	if s != nil {
+		s.worker.start(context.Background(), s.runShared)
+	}
+}
+
+func (s *ScheduledTestRunnerService) runShared(ctx context.Context) {
+	if ctx.Err() != nil || s.planRepo == nil {
 		return
 	}
-	s.startOnce.Do(func() {
-		loc := time.Local
-		if s.cfg != nil {
-			if parsed, err := time.LoadLocation(s.cfg.Timezone); err == nil && parsed != nil {
-				loc = parsed
-			}
+	loc := time.Local
+	if s.cfg != nil {
+		if parsed, err := time.LoadLocation(s.cfg.Timezone); err == nil && parsed != nil {
+			loc = parsed
 		}
+	}
 
-		options := []cron.Option{cron.WithParser(scheduledTestCronParser), cron.WithLocation(loc)}
-		if s.cfg != nil && s.cfg.EntryNode.ClusterEnabled {
-			options = append(options, cron.WithChain(cron.SkipIfStillRunning(cron.DefaultLogger)))
-		}
-		c := cron.New(options...)
-		_, err := c.AddFunc("* * * * *", func() { s.runScheduled() })
-		if err != nil {
-			logger.LegacyPrintf("service.scheduled_test_runner", "[ScheduledTestRunner] not started (invalid schedule): %v", err)
-			return
-		}
-		s.cron = c
-		s.cron.Start()
-		logger.LegacyPrintf("service.scheduled_test_runner", "[ScheduledTestRunner] started (tick=every minute)")
-	})
+	options := []cron.Option{cron.WithParser(scheduledTestCronParser), cron.WithLocation(loc)}
+	if s.cfg != nil && s.cfg.EntryNode.ClusterEnabled {
+		options = append(options, cron.WithChain(cron.SkipIfStillRunning(cron.DefaultLogger)))
+	}
+	c := cron.New(options...)
+	_, err := c.AddFunc("* * * * *", func() { s.runScheduled(ctx) })
+	if err != nil {
+		logger.LegacyPrintf("service.scheduled_test_runner", "[ScheduledTestRunner] not started (invalid schedule): %v", err)
+		return
+	}
+	c.Start()
+	logger.LegacyPrintf("service.scheduled_test_runner", "[ScheduledTestRunner] started (tick=every minute)")
+	<-ctx.Done()
+	<-c.Stop().Done()
 }
 
 // Stop gracefully shuts down the cron scheduler.
 func (s *ScheduledTestRunnerService) Stop() {
-	if s == nil {
-		return
+	if s != nil {
+		s.worker.stop()
 	}
-	s.stopOnce.Do(func() {
-		if s.cron != nil {
-			ctx := s.cron.Stop()
-			select {
-			case <-ctx.Done():
-			case <-time.After(3 * time.Second):
-				logger.LegacyPrintf("service.scheduled_test_runner", "[ScheduledTestRunner] cron stop timed out")
-			}
-		}
-	})
 }
 
-func (s *ScheduledTestRunnerService) runScheduled() {
+func (s *ScheduledTestRunnerService) runScheduled(parent context.Context) {
 	// Delay 10s so execution lands at ~:10 of each minute instead of :00.
-	time.Sleep(10 * time.Second)
+	sleepOrDone(parent, 10*time.Second)
+	if parent.Err() != nil {
+		return
+	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	ctx, cancel := context.WithTimeout(parent, 5*time.Minute)
 	defer cancel()
 
 	now := time.Now()
@@ -111,7 +107,12 @@ func (s *ScheduledTestRunnerService) runScheduled() {
 	var wg sync.WaitGroup
 
 	for _, plan := range plans {
-		sem <- struct{}{}
+		select {
+		case <-ctx.Done():
+			wg.Wait()
+			return
+		case sem <- struct{}{}:
+		}
 		wg.Add(1)
 		go func(p *ScheduledTestPlan) {
 			defer wg.Done()

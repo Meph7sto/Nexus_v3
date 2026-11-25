@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"math"
 	"math/rand/v2"
-	"sync"
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
@@ -38,11 +37,10 @@ type QueueLockResult struct {
 // UserMessageQueueService 用户消息串行队列服务
 // 对真实用户消息实施账号级串行化 + RPM 自适应延迟
 type UserMessageQueueService struct {
-	cache    UserMsgQueueCache
-	rpmCache RPMCache
-	cfg      *config.UserMessageQueueConfig
-	stopCh   chan struct{} // graceful shutdown
-	stopOnce sync.Once     // 确保 Stop() 并发安全
+	cache         UserMsgQueueCache
+	rpmCache      RPMCache
+	cfg           *config.UserMessageQueueConfig
+	cleanupWorker sharedTaskRunner
 }
 
 // NewUserMessageQueueService 创建用户消息串行队列服务
@@ -51,7 +49,6 @@ func NewUserMessageQueueService(cache UserMsgQueueCache, rpmCache RPMCache, cfg 
 		cache:    cache,
 		rpmCache: rpmCache,
 		cfg:      cfg,
-		stopCh:   make(chan struct{}),
 	}
 }
 
@@ -247,12 +244,20 @@ func (s *UserMessageQueueService) CalculateRPMAwareDelay(ctx context.Context, ac
 // StartCleanupWorker 启动孤儿锁清理 worker。
 // worker 只处理锁索引中的到期候选，真正删除前由 cache 层再次校验锁 PTTL。
 func (s *UserMessageQueueService) StartCleanupWorker(interval time.Duration) {
+	if s != nil {
+		s.cleanupWorker.start(context.Background(), func(ctx context.Context) {
+			s.runCleanupWorker(ctx, interval)
+		})
+	}
+}
+
+func (s *UserMessageQueueService) runCleanupWorker(ctx context.Context, interval time.Duration) {
 	if s == nil || s.cache == nil || interval <= 0 {
 		return
 	}
 
-	runCleanup := func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	runSharedPeriodic(ctx, interval, false, func(parent context.Context) {
+		ctx, cancel := context.WithTimeout(parent, 10*time.Second)
 		defer cancel()
 
 		// 每轮限制处理数量，避免清理任务在大量过期候选时长时间占用 Redis。
@@ -265,28 +270,13 @@ func (s *UserMessageQueueService) StartCleanupWorker(interval time.Duration) {
 		if cleaned > 0 {
 			logger.LegacyPrintf("service.umq", "Cleanup completed: released %d orphaned locks", cleaned)
 		}
-	}
-
-	go func() {
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-s.stopCh:
-				return
-			case <-ticker.C:
-				runCleanup()
-			}
-		}
-	}()
+	})
 }
 
 // Stop 停止后台 cleanup worker
 func (s *UserMessageQueueService) Stop() {
-	if s != nil && s.stopCh != nil {
-		s.stopOnce.Do(func() {
-			close(s.stopCh)
-		})
+	if s != nil {
+		s.cleanupWorker.stop()
 	}
 }
 

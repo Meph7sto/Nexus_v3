@@ -12,12 +12,12 @@ import (
 
 // stubMonitorSvc 实现 monitorRunnerSvc，用于隔离 runner 与真实 service/repo。
 type stubMonitorSvc struct {
-	enabled    []*ChannelMonitor
-	runCount   atomic.Int64
-	runCalled  chan int64 // 每次 RunCheck 触发时 push 一次（缓冲足够大避免阻塞）
-	runErr     error
-	listErr    error
-	runHoldFor time.Duration // RunCheck 内额外阻塞的时长，用来测试 Stop 等待行为
+	enabled   []*ChannelMonitor
+	runCount  atomic.Int64
+	runCalled chan int64 // 每次 RunCheck 触发时 push 一次（缓冲足够大避免阻塞）
+	runErr    error
+	listErr   error
+	runHook   func(context.Context)
 }
 
 func (s *stubMonitorSvc) ListEnabledMonitors(_ context.Context) ([]*ChannelMonitor, error) {
@@ -35,11 +35,8 @@ func (s *stubMonitorSvc) RunCheck(ctx context.Context, id int64) ([]*CheckResult
 		default:
 		}
 	}
-	if s.runHoldFor > 0 {
-		select {
-		case <-time.After(s.runHoldFor):
-		case <-ctx.Done():
-		}
+	if s.runHook != nil {
+		s.runHook(ctx)
 	}
 	return nil, s.runErr
 }
@@ -300,13 +297,30 @@ func TestStop_DrainsAllGoroutines(t *testing.T) {
 
 // TestStop_WaitsForInFlightCheck 验证 Stop 会等待正在执行的 RunCheck 退出（pool.StopAndWait）。
 func TestStop_WaitsForInFlightCheck(t *testing.T) {
+	canceled := make(chan struct{}, 2)
+	allowCleanup := make(chan struct{})
+	var cleanupOnce sync.Once
+	releaseCleanup := func() { cleanupOnce.Do(func() { close(allowCleanup) }) }
+	var cleaned atomic.Bool
 	svc := &stubMonitorSvc{
-		runCalled:  make(chan int64, 1),
-		runHoldFor: 200 * time.Millisecond,
+		enabled:   []*ChannelMonitor{{ID: 1, Enabled: true, IntervalSeconds: 60}},
+		runCalled: make(chan int64, 1),
+		runHook: func(ctx context.Context) {
+			select {
+			case <-ctx.Done():
+				canceled <- struct{}{}
+				<-allowCleanup
+			case <-allowCleanup:
+			}
+			cleaned.Store(true)
+		},
 	}
 	r := newRunnerForTest(svc)
+	t.Cleanup(func() {
+		releaseCleanup()
+		stoppedWithin(t, r, 3*time.Second)
+	})
 	r.Start()
-	r.Schedule(&ChannelMonitor{ID: 1, Enabled: true, IntervalSeconds: 60})
 
 	select {
 	case <-svc.runCalled:
@@ -314,13 +328,39 @@ func TestStop_WaitsForInFlightCheck(t *testing.T) {
 		t.Fatal("first fire never happened")
 	}
 
-	start := time.Now()
-	stoppedWithin(t, r, 3*time.Second)
-	elapsed := time.Since(start)
-	// Stop 必须等待 in-flight check 跑完（runHoldFor=200ms），耗时下界约 100ms。
-	if elapsed < 100*time.Millisecond {
-		t.Fatalf("Stop returned too fast (%v); did not wait for in-flight check", elapsed)
+	stopped := make(chan bool, 1)
+	go func() {
+		r.Stop()
+		stopped <- cleaned.Load()
+	}()
+	select {
+	case <-canceled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Stop did not cancel the in-flight check")
 	}
+	select {
+	case <-stopped:
+		t.Fatal("Stop returned while the canceled check was still cleaning up")
+	default:
+	}
+	releaseCleanup()
+	select {
+	case drained := <-stopped:
+		if !drained {
+			t.Fatal("Stop returned before RunCheck finished")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Stop did not return after the check cleaned up")
+	}
+
+	// A new lease starts with a fresh pool and can schedule the same monitor.
+	r.Start()
+	select {
+	case <-svc.runCalled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("runner could not start a check again after Stop")
+	}
+	stoppedWithin(t, r, 3*time.Second)
 }
 
 // TestInFlight_PoolFullReleasesSlot 直接驱动 fire 路径，模拟 pool.TrySubmit 失败时 inFlight 必须释放。

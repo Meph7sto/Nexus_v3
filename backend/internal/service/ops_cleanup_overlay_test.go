@@ -268,7 +268,9 @@ func TestReload_BeforeStart_IsNoop(t *testing.T) {
 }
 
 func TestReload_AfterStop_IsNoop(t *testing.T) {
-	svc := &OpsCleanupService{started: true, stopped: true}
+	ctx, cancel := context.WithCancel(context.Background())
+	svc := &OpsCleanupService{epochCtx: ctx, epochStop: cancel}
+	svc.Stop()
 	if err := svc.Reload(context.Background()); err != nil {
 		t.Fatalf("Reload after Stop should return nil, got %v", err)
 	}
@@ -289,7 +291,9 @@ func TestUpdateOpsAdvancedSettings_NilReloader_NoPanic(t *testing.T) {
 }
 
 func TestStart_IdempotentSecondCall(t *testing.T) {
-	svc := &OpsCleanupService{started: true}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	svc := &OpsCleanupService{epochCtx: ctx, epochStop: cancel}
 	svc.Start() // second call should be noop, not panic
 }
 

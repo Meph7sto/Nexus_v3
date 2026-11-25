@@ -12,8 +12,6 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"net/netip"
-	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -34,7 +32,6 @@ const (
 
 var (
 	errWorkerNotConnected = errors.New("worker connection could not be established")
-	workerOverlayIPv4     = netip.MustParsePrefix("100.64.0.0/10")
 )
 
 // DistributedHTTPUpstream routes upstream calls through the active Worker pool.
@@ -172,11 +169,11 @@ func buildWorkerSnapshot(cfg config.WorkerPoolConfig) (*workerSnapshot, error) {
 	var tlsConfig *tls.Config
 	for i, node := range cfg.Nodes {
 		id := strings.TrimSpace(node.ID)
-		address, err := workerEndpointURL(node.URL, cfg.AllowPrivateH2C)
+		address, err := config.WorkerEndpointURL(node.URL, cfg.AllowPrivateH2C)
 		if err != nil {
 			return nil, fmt.Errorf("worker node %d: %w", i+1, err)
 		}
-		urlKey := address.Scheme + "://" + net.JoinHostPort(strings.ToLower(address.Hostname()), workerPort(address))
+		urlKey := address.Scheme + "://" + net.JoinHostPort(strings.ToLower(address.Hostname()), config.WorkerEndpointPort(address))
 		if id == "" || seenIDs[id] || seenAddresses[urlKey] || node.Weight < 0 || node.MaxInFlight < 0 {
 			return nil, fmt.Errorf("worker node %d has invalid or duplicate identity, address, or weight", i+1)
 		}
@@ -200,37 +197,6 @@ func buildWorkerSnapshot(cfg config.WorkerPoolConfig) (*workerSnapshot, error) {
 	return snapshot, nil
 }
 
-func workerEndpointURL(value string, allowPrivateH2C bool) (*url.URL, error) {
-	u, err := url.Parse(strings.TrimSpace(value))
-	if err != nil || u.Hostname() == "" || u.User != nil || u.Opaque != "" ||
-		u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || u.RawPath != "" ||
-		(u.Path != "" && u.Path != "/") {
-		return nil, errors.New("worker URL must be a private HTTP(S) origin without credentials or path")
-	}
-	if u.Scheme != "https" && (u.Scheme != "http" || !allowPrivateH2C) {
-		return nil, errors.New("worker URL requires mTLS or explicitly enabled private h2c")
-	}
-	port, err := strconv.Atoi(workerPort(u))
-	if err != nil || port < 1 || port > 65535 {
-		return nil, errors.New("worker URL has an invalid port")
-	}
-	if ip, err := netip.ParseAddr(u.Hostname()); err == nil && !privateWorkerIP(ip) {
-		return nil, errors.New("worker URL must use a private address")
-	}
-	u.Path = ""
-	return u, nil
-}
-
-func workerPort(u *url.URL) string {
-	if port := u.Port(); port != "" {
-		return port
-	}
-	if u.Scheme == "https" {
-		return "443"
-	}
-	return "80"
-}
-
 func workerToken(node config.WorkerNodeConfig) (string, error) {
 	if node.SharedToken != "" && node.SharedTokenFile != "" {
 		return "", errors.New("set only one worker token source")
@@ -243,9 +209,7 @@ func workerToken(node config.WorkerNodeConfig) (string, error) {
 		}
 		token = strings.TrimSpace(string(content))
 	}
-	if len(token) < 32 || strings.IndexFunc(token, func(r rune) bool {
-		return r < '!' || r > '~' || r == ','
-	}) >= 0 {
+	if !config.ValidWorkerSharedToken(token) {
 		return "", errors.New("a valid worker bearer token is required")
 	}
 	return token, nil
@@ -290,11 +254,6 @@ func newWorkerHTTPClient(scheme string, tlsConfig *tls.Config) *http.Client {
 	}
 }
 
-func privateWorkerIP(ip netip.Addr) bool {
-	ip = ip.Unmap()
-	return ip.Zone() == "" && (ip.IsPrivate() || ip.IsLoopback() || workerOverlayIPv4.Contains(ip))
-}
-
 func dialPrivateWorker(ctx context.Context, network, address string) (net.Conn, error) {
 	host, port, err := net.SplitHostPort(address)
 	if err != nil {
@@ -302,18 +261,13 @@ func dialPrivateWorker(ctx context.Context, network, address string) (net.Conn, 
 	}
 	dialCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	ips, err := net.DefaultResolver.LookupNetIP(dialCtx, "ip", host)
-	if err != nil || len(ips) == 0 {
+	ips, err := config.ResolvePrivateWorkerIPs(dialCtx, host)
+	if err != nil {
 		return nil, errWorkerNotConnected
-	}
-	for _, ip := range ips {
-		if !privateWorkerIP(ip) {
-			return nil, errWorkerNotConnected
-		}
 	}
 	var dialer net.Dialer
 	for _, ip := range ips {
-		conn, err := dialer.DialContext(dialCtx, network, net.JoinHostPort(ip.Unmap().String(), port))
+		conn, err := dialer.DialContext(dialCtx, network, net.JoinHostPort(ip.String(), port))
 		if err == nil {
 			return conn, nil
 		}
@@ -474,11 +428,14 @@ func (n *relayWorker) readHealth(ctx context.Context) (workerproto.Health, error
 			resp.StatusCode == http.StatusServiceUnavailable && health.Status == workerproto.HealthDraining) {
 		return health, service.ErrWorkerClusterUnavailable
 	}
+	if strings.Contains(health.Version, n.token) {
+		health.Version = ""
+	}
 	return health, nil
 }
 
 func newWorkerAdminClient(cfg config.WorkerPoolConfig, node config.WorkerNodeConfig) (*relayWorker, error) {
-	address, err := workerEndpointURL(node.URL, cfg.AllowPrivateH2C)
+	address, err := config.WorkerEndpointURL(node.URL, cfg.AllowPrivateH2C)
 	if err != nil {
 		return nil, err
 	}

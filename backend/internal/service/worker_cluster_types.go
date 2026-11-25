@@ -9,26 +9,30 @@ import (
 )
 
 var (
-	ErrWorkerClusterUninitialized = errors.New("worker cluster configuration has not been initialized")
-	ErrWorkerClusterConflict      = errors.New("worker cluster configuration changed; reload before editing")
-	ErrWorkerClusterInvalid       = errors.New("invalid worker cluster configuration")
-	ErrWorkerClusterUnavailable   = errors.New("worker cluster is unavailable")
-	ErrWorkerNodeNotFound         = errors.New("worker node not found")
+	ErrWorkerClusterUninitialized  = errors.New("worker cluster configuration has not been initialized")
+	ErrWorkerClusterConflict       = errors.New("worker cluster configuration changed; reload before editing")
+	ErrWorkerClusterInvalid        = errors.New("invalid worker cluster configuration")
+	ErrWorkerClusterUnavailable    = errors.New("worker cluster is unavailable")
+	ErrWorkerNodeNotFound          = errors.New("worker node not found")
+	ErrWorkerTokenKeyNotConfigured = errors.New("a fixed TOTP_ENCRYPTION_KEY is required for managed Workers")
 )
 
 type WorkerNode struct {
-	NodeID       string   `json:"node_id"`
-	Name         string   `json:"name"`
-	URL          string   `json:"url"`
-	UseH2C       bool     `json:"use_h2c"`
-	Weight       int      `json:"weight"`
-	MaxInFlight  int      `json:"max_inflight"`
-	Tags         []string `json:"tags"`
-	Note         string   `json:"note"`
-	Enabled      bool     `json:"enabled"`
-	SecretRef    string   `json:"secret_ref"`
-	DrainVersion int64    `json:"drain_version"`
-	DrainEntries []string `json:"drain_entries"`
+	NodeID           string   `json:"node_id"`
+	Name             string   `json:"name"`
+	URL              string   `json:"url"`
+	UseH2C           bool     `json:"use_h2c"`
+	Weight           int      `json:"weight"`
+	MaxInFlight      int      `json:"max_inflight"`
+	Tags             []string `json:"tags"`
+	Note             string   `json:"note"`
+	Enabled          bool     `json:"enabled"`
+	SecretRef        string   `json:"secret_ref"`
+	DrainVersion     int64    `json:"drain_version"`
+	DrainEntries     []string `json:"drain_entries"`
+	EncryptedToken   string   `json:"-"`
+	HasToken         bool     `json:"has_token"`
+	CredentialSource string   `json:"credential_source"`
 }
 
 type WorkerPoolPolicy struct {

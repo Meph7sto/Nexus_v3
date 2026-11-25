@@ -38,6 +38,7 @@ type clusterWorkerInput struct {
 	Note        string   `json:"note"`
 	Enabled     bool     `json:"enabled"`
 	SecretRef   string   `json:"secret_ref"`
+	SharedToken string   `json:"shared_token"`
 }
 
 func (h *ClusterHandler) hasWorker(c *gin.Context) bool {
@@ -78,6 +79,9 @@ func clusterResult(c *gin.Context, result any, err error) {
 		return
 	case errors.Is(err, service.ErrWorkerNodeNotFound):
 		response.NotFound(c, "Worker node not found")
+		return
+	case errors.Is(err, service.ErrWorkerTokenKeyNotConfigured):
+		response.ErrorWithDetails(c, http.StatusBadRequest, service.ErrWorkerTokenKeyNotConfigured.Error(), "WORKER_TOKEN_KEY_NOT_CONFIGURED", nil)
 		return
 	case errors.Is(err, service.ErrWorkerClusterInvalid):
 		response.BadRequest(c, "Invalid Worker configuration or unapproved binding")
@@ -160,7 +164,7 @@ func (h *ClusterHandler) SaveWorker(c *gin.Context) {
 		NodeID: node.NodeID, Name: node.Name, URL: node.URL, UseH2C: node.UseH2C,
 		Weight: node.Weight, MaxInFlight: node.MaxInFlight, Tags: node.Tags, Note: node.Note,
 		Enabled: node.Enabled, SecretRef: node.SecretRef,
-	}, *body.ExpectedVersion)
+	}, *body.ExpectedVersion, node.SharedToken)
 	clusterResult(c, snapshot, err)
 }
 

@@ -51,13 +51,12 @@ type OpsCleanupService struct {
 
 	instanceID string
 
-	// mu 守护 cron 实例切换 + effective 配置切换。
-	// 这里不再用 startOnce/stopOnce，是因为 Reload 需要"停旧 cron 重启新 cron"，
-	// 而 Once 一旦触发就无法再次执行；改为 started/stopped 布尔配合 mu。
+	lifecycle sync.Mutex
 	mu        sync.Mutex
 	cron      *cron.Cron
-	started   bool
-	stopped   bool
+	epochCtx  context.Context
+	epochStop context.CancelFunc
+	cronStop  context.CancelFunc
 	effective opsCleanupEffectiveConfig
 
 	warnNoRedisOnce sync.Once
@@ -90,6 +89,10 @@ func NewOpsCleanupService(
 // Start 首次启动 cron 调度。Enabled / Schedule 由 effective 配置决定（settings 优先 cfg）。
 // 重复调用幂等。
 func (s *OpsCleanupService) Start() {
+	s.startContext(context.Background())
+}
+
+func (s *OpsCleanupService) startContext(parent context.Context) {
 	if s == nil {
 		return
 	}
@@ -101,13 +104,13 @@ func (s *OpsCleanupService) Start() {
 		return
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.started || s.stopped {
+	s.lifecycle.Lock()
+	defer s.lifecycle.Unlock()
+	if s.epochCtx != nil || parent.Err() != nil {
 		return
 	}
-	s.started = true
-	if err := s.applyScheduleLocked(context.Background()); err != nil {
+	s.epochCtx, s.epochStop = context.WithCancel(parent)
+	if err := s.applyScheduleLocked(s.epochCtx); err != nil {
 		logger.LegacyPrintf("service.ops_cleanup", "[OpsCleanup] not started: %v", err)
 	}
 }
@@ -117,41 +120,41 @@ func (s *OpsCleanupService) Stop() {
 	if s == nil {
 		return
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.stopped {
+	s.lifecycle.Lock()
+	defer s.lifecycle.Unlock()
+	if s.epochCtx == nil {
 		return
 	}
-	s.stopped = true
+	s.epochStop()
 	s.stopCronLocked()
+	s.epochCtx, s.epochStop = nil, nil
 }
 
-// stopCronLocked 停掉当前 cron 实例（带 3s 超时）。调用方持锁。
+// stopCronLocked cancels and joins the current schedule. Caller holds lifecycle,
+// not mu: a running cron job may need mu to read its retention configuration.
 func (s *OpsCleanupService) stopCronLocked() {
 	if s.cron == nil {
 		return
 	}
-	ctx := s.cron.Stop()
-	select {
-	case <-ctx.Done():
-	case <-time.After(opsCleanupCronStopTimeout):
-		logger.LegacyPrintf("service.ops_cleanup", "[OpsCleanup] cron stop timed out")
-	}
+	s.cronStop()
+	<-s.cron.Stop().Done()
 	s.cron = nil
+	s.cronStop = nil
 }
 
 // applyScheduleLocked 重新计算 effective 配置并按其 schedule 重建 cron。调用方持锁。
 // 若 effective.Enabled=false（用户在 UI 关闭清理），停旧 cron 后直接返回，不创建新 cron。
 func (s *OpsCleanupService) applyScheduleLocked(ctx context.Context) error {
-	s.computeEffectiveLocked(ctx)
 	s.stopCronLocked()
+	s.refreshEffectiveBeforeRun(ctx)
+	effective := s.snapshotEffective()
 
-	if !s.effective.Enabled {
+	if !effective.Enabled || s.epochCtx.Err() != nil {
 		logger.LegacyPrintf("service.ops_cleanup", "[OpsCleanup] cron disabled by settings")
 		return nil
 	}
 
-	schedule := strings.TrimSpace(s.effective.Schedule)
+	schedule := strings.TrimSpace(effective.Schedule)
 	if schedule == "" {
 		schedule = opsCleanupDefaultSchedule
 	}
@@ -164,18 +167,21 @@ func (s *OpsCleanupService) applyScheduleLocked(ctx context.Context) error {
 	}
 
 	c := cron.New(cron.WithParser(opsCleanupCronParser), cron.WithLocation(loc))
-	if _, err := c.AddFunc(schedule, func() { s.runScheduled() }); err != nil {
+	cronCtx, cronStop := context.WithCancel(s.epochCtx)
+	if _, err := c.AddFunc(schedule, func() { s.runScheduled(cronCtx) }); err != nil {
+		cronStop()
 		return fmt.Errorf("invalid schedule %q: %w", schedule, err)
 	}
 	c.Start()
 	s.cron = c
+	s.cronStop = cronStop
 	logger.LegacyPrintf("service.ops_cleanup",
 		"[OpsCleanup] scheduled (schedule=%q tz=%s retention_days=err:%d/system:%d/min:%d/hour:%d)",
 		schedule, loc.String(),
-		s.effective.ErrorLogRetentionDays,
-		s.effective.SystemLogRetentionDays,
-		s.effective.MinuteMetricsRetentionDays,
-		s.effective.HourlyMetricsRetentionDays,
+		effective.ErrorLogRetentionDays,
+		effective.SystemLogRetentionDays,
+		effective.MinuteMetricsRetentionDays,
+		effective.HourlyMetricsRetentionDays,
 	)
 	return nil
 }
@@ -188,11 +194,18 @@ func (s *OpsCleanupService) Reload(ctx context.Context) error {
 	if s == nil {
 		return nil
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if !s.started || s.stopped {
+	s.lifecycle.Lock()
+	defer s.lifecycle.Unlock()
+	if s.epochCtx == nil || s.epochCtx.Err() != nil {
 		return nil
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	stop := context.AfterFunc(s.epochCtx, cancel)
+	defer stop()
 	return s.applyScheduleLocked(ctx)
 }
 
@@ -281,12 +294,12 @@ func (s *OpsCleanupService) refreshEffectiveBeforeRun(ctx context.Context) {
 	s.computeEffectiveLocked(ctx)
 }
 
-func (s *OpsCleanupService) runScheduled() {
-	if s == nil || s.db == nil || s.opsRepo == nil {
+func (s *OpsCleanupService) runScheduled(parent context.Context) {
+	if s == nil || s.db == nil || s.opsRepo == nil || parent.Err() != nil {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), opsCleanupRunTimeout)
+	ctx, cancel := context.WithTimeout(parent, opsCleanupRunTimeout)
 	defer cancel()
 
 	// 让 retention 改动当次生效（schedule/enabled 改动需要 Reload）。
@@ -305,11 +318,11 @@ func (s *OpsCleanupService) runScheduled() {
 
 	counts, err := s.runCleanupOnce(ctx)
 	if err != nil {
-		s.recordHeartbeatError(runAt, time.Since(startedAt), err)
+		s.recordHeartbeatError(parent, runAt, time.Since(startedAt), err)
 		logger.LegacyPrintf("service.ops_cleanup", "[OpsCleanup] cleanup failed: %v", err)
 		return
 	}
-	s.recordHeartbeatSuccess(runAt, time.Since(startedAt), counts)
+	s.recordHeartbeatSuccess(parent, runAt, time.Since(startedAt), counts)
 	logger.L().Info("[OpsCleanup] cleanup complete",
 		zap.String("component", "service.ops_cleanup"),
 		zap.String("deleted_counts", counts.String()),
@@ -401,14 +414,14 @@ func (s *OpsCleanupService) tryAcquireLeaderLock(ctx context.Context) (func(), b
 	return release, true
 }
 
-func (s *OpsCleanupService) recordHeartbeatSuccess(runAt time.Time, duration time.Duration, counts opsCleanupDeletedCounts) {
+func (s *OpsCleanupService) recordHeartbeatSuccess(parent context.Context, runAt time.Time, duration time.Duration, counts opsCleanupDeletedCounts) {
 	if s == nil || s.opsRepo == nil {
 		return
 	}
 	now := time.Now().UTC()
 	durMs := duration.Milliseconds()
 	result := truncateString(counts.String(), 2048)
-	ctx, cancel := context.WithTimeout(context.Background(), opsCleanupHeartbeatTimeout)
+	ctx, cancel := context.WithTimeout(parent, opsCleanupHeartbeatTimeout)
 	defer cancel()
 	_ = s.opsRepo.UpsertJobHeartbeat(ctx, &OpsUpsertJobHeartbeatInput{
 		JobName:        opsCleanupJobName,
@@ -419,14 +432,14 @@ func (s *OpsCleanupService) recordHeartbeatSuccess(runAt time.Time, duration tim
 	})
 }
 
-func (s *OpsCleanupService) recordHeartbeatError(runAt time.Time, duration time.Duration, err error) {
+func (s *OpsCleanupService) recordHeartbeatError(parent context.Context, runAt time.Time, duration time.Duration, err error) {
 	if s == nil || s.opsRepo == nil || err == nil {
 		return
 	}
 	now := time.Now().UTC()
 	durMs := duration.Milliseconds()
 	msg := truncateString(err.Error(), 2048)
-	ctx, cancel := context.WithTimeout(context.Background(), opsCleanupHeartbeatTimeout)
+	ctx, cancel := context.WithTimeout(parent, opsCleanupHeartbeatTimeout)
 	defer cancel()
 	_ = s.opsRepo.UpsertJobHeartbeat(ctx, &OpsUpsertJobHeartbeatInput{
 		JobName:        opsCleanupJobName,

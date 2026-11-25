@@ -80,40 +80,44 @@ func (s *MonthlyLedgerService) SetEmailPreferences(ctx context.Context, userIDs 
 }
 
 func (s *MonthlyLedgerService) StartEmailNotifications(email *NotificationEmailService) {
-	ctx, cancel := context.WithCancel(context.Background())
-	s.emailCancel = cancel
-	s.emailDone = make(chan struct{})
-	go func() {
-		defer close(s.emailDone)
-		for {
-			startedAt := s.now().In(s.location)
-			runCtx, runCancel := context.WithTimeout(ctx, 4*time.Minute)
-			err := s.processEmailNotifications(runCtx, email.Send)
-			if err != nil && ctx.Err() == nil {
-				slog.Error("monthly ledger email processing failed", "error", err)
-			}
-			runCancel()
-			if ctx.Err() != nil {
-				return
-			}
-			checkCtx, checkCancel := context.WithTimeout(ctx, 10*time.Second)
-			pending, checkErr := s.hasPendingEmails(checkCtx)
-			checkCancel()
-			if checkErr != nil {
-				slog.Error("monthly ledger email pending check failed", "error", checkErr)
-			}
-			// Empty queues sleep until next month; unfinished work resumes the next day.
-			// Keep a month boundary crossed during catch-up from being skipped.
-			next := nextMonthlyLedgerEmailRun(startedAt, pending || err != nil || checkErr != nil)
-			timer := time.NewTimer(next.Sub(s.now()))
-			select {
-			case <-ctx.Done():
-				timer.Stop()
-				return
-			case <-timer.C:
-			}
+	s.emailWorker.start(context.Background(), func(ctx context.Context) {
+		s.runEmailNotificationsWithSender(ctx, email.Send)
+	})
+}
+
+func (s *MonthlyLedgerService) runEmailNotifications(ctx context.Context) {
+	s.runEmailNotificationsWithSender(ctx, s.emailSend)
+}
+
+func (s *MonthlyLedgerService) runEmailNotificationsWithSender(ctx context.Context, send func(context.Context, NotificationEmailSendInput) error) {
+	for ctx.Err() == nil {
+		startedAt := s.now().In(s.location)
+		runCtx, runCancel := context.WithTimeout(ctx, 4*time.Minute)
+		err := s.processEmailNotifications(runCtx, send)
+		if err != nil && ctx.Err() == nil {
+			slog.Error("monthly ledger email processing failed", "error", err)
 		}
-	}()
+		runCancel()
+		if ctx.Err() != nil {
+			return
+		}
+		checkCtx, checkCancel := context.WithTimeout(ctx, 10*time.Second)
+		pending, checkErr := s.hasPendingEmails(checkCtx)
+		checkCancel()
+		if checkErr != nil {
+			slog.Error("monthly ledger email pending check failed", "error", checkErr)
+		}
+		// Empty queues sleep until next month; unfinished work resumes the next day.
+		// Keep a month boundary crossed during catch-up from being skipped.
+		next := nextMonthlyLedgerEmailRun(startedAt, pending || err != nil || checkErr != nil)
+		timer := time.NewTimer(next.Sub(s.now()))
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+	}
 }
 
 func (s *MonthlyLedgerService) hasPendingEmails(ctx context.Context) (bool, error) {
@@ -140,14 +144,8 @@ func nextMonthlyLedgerEmailRun(now time.Time, pending bool) time.Time {
 }
 
 func (s *MonthlyLedgerService) Stop() {
-	if s.incomeCancel != nil {
-		s.incomeCancel()
-		<-s.incomeDone
-	}
-	if s.emailCancel != nil {
-		s.emailCancel()
-		<-s.emailDone
-	}
+	s.incomeWorker.stop()
+	s.emailWorker.stop()
 }
 
 func (s *MonthlyLedgerService) processEmailNotifications(ctx context.Context, send func(context.Context, NotificationEmailSendInput) error) error {

@@ -28,9 +28,11 @@ type AuditLogService struct {
 
 	queue chan *AuditLog
 
-	ctx    context.Context
-	cancel context.CancelFunc
-	wg     sync.WaitGroup
+	ctx        context.Context
+	cancel     context.CancelFunc
+	wg         sync.WaitGroup
+	writerOnce sync.Once
+	retention  sharedTaskRunner
 
 	droppedCount uint64
 	writeFailed  uint64
@@ -57,11 +59,12 @@ func (s *AuditLogService) start(runRetention bool) {
 	if s == nil || s.repo == nil {
 		return
 	}
-	s.wg.Add(1)
-	go s.runWriter()
-	if runRetention {
+	s.writerOnce.Do(func() {
 		s.wg.Add(1)
-		go s.runRetentionLoop()
+		go s.runWriter()
+	})
+	if runRetention {
+		s.retention.start(s.ctx, s.runRetentionLoop)
 	}
 }
 
@@ -71,6 +74,7 @@ func (s *AuditLogService) Stop() {
 		return
 	}
 	s.cancel()
+	s.retention.stop()
 	s.wg.Wait()
 }
 
@@ -192,34 +196,23 @@ func (s *AuditLogService) runWriter() {
 }
 
 // runRetentionLoop 按保留期定期删除过期审计日志。
-// 删除操作幂等，多实例并发执行无害，因此无需选主。
-func (s *AuditLogService) runRetentionLoop() {
-	defer s.wg.Done()
-
+func (s *AuditLogService) runRetentionLoop(ctx context.Context) {
+	if s.repo == nil {
+		return
+	}
 	startupTimer := time.NewTimer(auditRetentionStartupDelay)
 	defer startupTimer.Stop()
 	select {
-	case <-s.ctx.Done():
+	case <-ctx.Done():
 		return
 	case <-startupTimer.C:
 	}
 
-	ticker := time.NewTicker(auditRetentionCheckInterval)
-	defer ticker.Stop()
-
-	s.runRetentionOnce()
-	for {
-		select {
-		case <-s.ctx.Done():
-			return
-		case <-ticker.C:
-			s.runRetentionOnce()
-		}
-	}
+	runSharedPeriodic(ctx, auditRetentionCheckInterval, true, s.runRetentionOnce)
 }
 
-func (s *AuditLogService) runRetentionOnce() {
-	ctx, cancel := context.WithTimeout(s.ctx, 10*time.Minute)
+func (s *AuditLogService) runRetentionOnce(parent context.Context) {
+	ctx, cancel := context.WithTimeout(parent, 10*time.Minute)
 	defer cancel()
 
 	days := 0

@@ -74,7 +74,7 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 	return nil, nil
 }
 
-func provideWorkerCluster(cfg *config.Config, db *sql.DB, rdb *redis.Client, upstream service.HTTPUpstream, process *entryProcessState) (*service.WorkerClusterService, error) {
+func provideWorkerCluster(cfg *config.Config, db *sql.DB, rdb *redis.Client, upstream service.HTTPUpstream, process *entryProcessState, encryptor service.SecretEncryptor) (*service.WorkerClusterService, error) {
 	if !cfg.EntryNode.ClusterEnabled {
 		return nil, nil
 	}
@@ -82,11 +82,12 @@ func provideWorkerCluster(cfg *config.Config, db *sql.DB, rdb *redis.Client, ups
 	if !ok {
 		return nil, errors.New("Worker cluster requires a reloadable Worker transport")
 	}
-	clusterConfig := config.Config{EntryNode: cfg.EntryNode, WorkerPool: cfg.WorkerPool}
+	clusterConfig := config.Config{EntryNode: cfg.EntryNode, WorkerPool: cfg.WorkerPool,
+		Totp: config.TotpConfig{EncryptionKeyConfigured: cfg.Totp.EncryptionKeyConfigured}}
 	clusterConfig.WorkerPool.DrainTimeout = time.Duration(cfg.Gateway.StreamDataIntervalTimeout) * time.Second
 	return service.NewWorkerClusterService(
 		repository.NewWorkerNodeStore(db), repository.NewWorkerClusterCoordination(rdb),
-		runtime, &clusterConfig, process.status,
+		runtime, &clusterConfig, process.status, encryptor,
 	)
 }
 
@@ -165,12 +166,14 @@ func provideCleanup(
 	httpUpstream service.HTTPUpstream,
 	cluster *service.WorkerClusterService,
 	sharedTasks *service.SharedTaskGate,
+	settings *service.SettingService,
 ) func() {
 	return func() {
+		settings.StopSettingsBroadcast()
 		if cluster != nil {
 			cluster.Close()
 		}
-		defer sharedTasks.Stop()
+		sharedTasks.Stop()
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 

@@ -4,9 +4,7 @@ func ProvideMonthlyLedgerService(repo MonthlyLedgerRepository, email *Notificati
 	s := NewMonthlyLedgerService(repo)
 	s.emailSettings = settings
 	s.emailSend = email.Send
-	tasks.Start(func() {
-		s.StartEmailNotifications(email)
-		s.StartIncomeSchedules()
-	})
+	tasks.registerWorker(&s.emailWorker, s.runEmailNotifications)
+	tasks.registerWorker(&s.incomeWorker, s.runIncomeSchedules)
 	return s
 }

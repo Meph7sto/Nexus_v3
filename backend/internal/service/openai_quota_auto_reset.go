@@ -105,6 +105,7 @@ type OpenAIQuotaAutoResetService struct {
 	start   sync.Once
 	stop    sync.Once
 	wg      sync.WaitGroup
+	scanner sharedTaskRunner
 }
 
 func NewOpenAIQuotaAutoResetService(
@@ -146,11 +147,10 @@ func (s *OpenAIQuotaAutoResetService) startWorkers(scan bool) {
 			s.wg.Add(1)
 			go s.runWorker()
 		}
-		if scan {
-			s.wg.Add(1)
-			go s.runScanner()
-		}
 	})
+	if scan {
+		s.scanner.start(s.ctx, s.runScanner)
+	}
 }
 
 func (s *OpenAIQuotaAutoResetService) Stop() {
@@ -160,6 +160,7 @@ func (s *OpenAIQuotaAutoResetService) Stop() {
 	s.stop.Do(func() {
 		clearOpenAIAutoResetNotifier(s)
 		s.cancel()
+		s.scanner.stop()
 		s.wg.Wait()
 	})
 }
@@ -167,13 +168,21 @@ func (s *OpenAIQuotaAutoResetService) Stop() {
 // Notify 是请求热路径的非阻塞入口。同一账号尚在队列时只保留一个任务；队列
 // 满时丢弃本次信号，分钟扫描仍会补偿，因此不会反向拖慢网关请求。
 func (s *OpenAIQuotaAutoResetService) Notify(accountID int64) {
-	if s == nil || accountID <= 0 {
+	if s != nil {
+		s.notify(s.ctx, accountID)
+	}
+}
+
+func (s *OpenAIQuotaAutoResetService) notify(ctx context.Context, accountID int64) {
+	if accountID <= 0 || ctx.Err() != nil {
 		return
 	}
-	if _, loaded := s.pending.LoadOrStore(accountID, struct{}{}); loaded {
+	if _, loaded := s.pending.LoadOrStore(accountID, ctx); loaded {
 		return
 	}
 	select {
+	case <-ctx.Done():
+		s.pending.Delete(accountID)
 	case <-s.ctx.Done():
 		s.pending.Delete(accountID)
 	case s.queue <- accountID:
@@ -190,36 +199,40 @@ func (s *OpenAIQuotaAutoResetService) runWorker() {
 		case <-s.ctx.Done():
 			return
 		case accountID := <-s.queue:
-			ctx, cancel := context.WithTimeout(s.ctx, 50*time.Second)
+			value, ok := s.pending.Load(accountID)
+			if !ok {
+				continue
+			}
+			ctx, cancel := context.WithTimeout(value.(context.Context), 50*time.Second)
+			stop := context.AfterFunc(s.ctx, cancel)
+			if ctx.Err() != nil {
+				stop()
+				cancel()
+				s.pending.Delete(accountID)
+				continue
+			}
 			if err := s.evaluateAccount(ctx, accountID); err != nil && !errors.Is(err, context.Canceled) {
 				slog.Warn("openai_auto_reset_evaluate_failed", "account_id", accountID, "error_code", infraerrors.Reason(err))
 			}
+			stop()
 			cancel()
 			s.pending.Delete(accountID)
 		}
 	}
 }
 
-func (s *OpenAIQuotaAutoResetService) runScanner() {
-	defer s.wg.Done()
+func (s *OpenAIQuotaAutoResetService) runScanner(ctx context.Context) {
+	if s.accountRepo == nil || s.quota == nil || s.idempotency == nil {
+		return
+	}
 	timer := time.NewTimer(2 * time.Second)
 	defer timer.Stop()
 	select {
-	case <-s.ctx.Done():
+	case <-ctx.Done():
 		return
 	case <-timer.C:
-		s.scanEnabledAccounts(s.ctx)
 	}
-	ticker := time.NewTicker(openAIAutoResetScanInterval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-s.ctx.Done():
-			return
-		case <-ticker.C:
-			s.scanEnabledAccounts(s.ctx)
-		}
-	}
+	runSharedPeriodic(ctx, openAIAutoResetScanInterval, true, s.scanEnabledAccounts)
 }
 
 func (s *OpenAIQuotaAutoResetService) scanEnabledAccounts(ctx context.Context) {
@@ -241,7 +254,7 @@ func (s *OpenAIQuotaAutoResetService) scanEnabledAccounts(ctx context.Context) {
 		for i := range accounts {
 			account := &accounts[i]
 			if account.Schedulable && ResolveOpenAIAutoResetCreditConfig(account).Enabled {
-				s.Notify(account.ID)
+				s.notify(ctx, account.ID)
 			}
 		}
 		if len(accounts) < openAIAutoResetBatchSize || pageInfo == nil || page >= pageInfo.Pages {

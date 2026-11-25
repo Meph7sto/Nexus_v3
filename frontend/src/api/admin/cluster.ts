@@ -10,10 +10,16 @@ export interface WorkerConfig {
   tags: string[]
   note: string
   enabled: boolean
-  secret_ref: string
+  secret_ref?: string
+}
+
+export interface WorkerSaveInput extends WorkerConfig {
+  shared_token?: string
 }
 
 export interface WorkerNode extends WorkerConfig {
+  has_token?: boolean
+  credential_source?: 'managed' | 'binding'
   drain_version?: number
 }
 
@@ -113,7 +119,7 @@ const worker = (id: string) => `${base}/workers/${encodeURIComponent(id)}`
 
 export const clusterAPI = {
   view: () => apiClient.get<ClusterView>(base).then((r) => r.data),
-  saveWorker: (node: WorkerConfig, expected_version: number, existing: boolean) => {
+  saveWorker: (node: WorkerSaveInput, expected_version: number, existing: boolean) => {
     const body = { node, expected_version }
     return (existing
       ? apiClient.put<ClusterSnapshot>(worker(node.node_id), body)

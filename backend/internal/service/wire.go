@@ -107,7 +107,7 @@ func ProvideBatchImageModelPricingResolver(resolver *ModelPricingResolver) *Batc
 
 func ProvideBatchImageCleanupService(repo BatchImageRepository, accountRepo AccountRepository, cfg *config.Config, tasks *SharedTaskGate) *BatchImageCleanupService {
 	svc := NewBatchImageCleanupService(repo, accountRepo, cfg)
-	tasks.Start(svc.Start)
+	tasks.RegisterLifecycle(svc.startContext, svc.Stop)
 	return svc
 }
 
@@ -148,7 +148,7 @@ func ProvideTokenRefreshService(
 	// 调用侧显式注入后台刷新策略，避免策略漂移
 	svc.SetRefreshPolicy(DefaultBackgroundRefreshPolicy())
 	svc.SetAccountRuntimeBlocker(runtimeBlocker)
-	tasks.Start(svc.Start)
+	tasks.registerWorker(&svc.worker, svc.runShared)
 	return svc
 }
 
@@ -223,7 +223,8 @@ func ProvideOpenAIQuotaAutoResetService(
 		settingService,
 		leaderLock,
 	)
-	service.startWorkers(tasks.Running())
+	service.startWorkers(false)
+	tasks.registerWorker(&service.scanner, service.runScanner)
 	return service
 }
 
@@ -338,7 +339,7 @@ func ProvideCNProviderBalanceCheckService(
 		minutes = cfg.Gateway.CNProviders.BalanceCheckIntervalMinutes
 	}
 	svc := NewCNProviderBalanceCheckService(accountRepo, balanceService, quotaService, cfg, time.Duration(minutes)*time.Minute)
-	tasks.Start(svc.Start)
+	tasks.registerWorker(&svc.worker, svc.runShared)
 	return svc
 }
 
@@ -393,7 +394,7 @@ func ProvideDashboardAggregationService(repo DashboardAggregationRepository, tim
 	svc := NewDashboardAggregationService(repo, timingWheel, cfg)
 	svc.settingRepo = settingRepo
 	svc.SetLeaderLock(lockCache, db)
-	tasks.Start(svc.Start)
+	tasks.registerWorker(&svc.worker, svc.runShared)
 	return svc
 }
 
@@ -401,14 +402,14 @@ func ProvideDashboardAggregationService(repo DashboardAggregationRepository, tim
 func ProvideUsageCleanupService(repo UsageCleanupRepository, timingWheel *TimingWheelService, dashboardAgg *DashboardAggregationService, interactionService *UsageInteractionService, cfg *config.Config, tasks *SharedTaskGate) *UsageCleanupService {
 	svc := NewUsageCleanupService(repo, timingWheel, dashboardAgg, cfg)
 	svc.SetUsageInteractionService(interactionService)
-	tasks.Start(svc.Start)
+	tasks.registerWorker(&svc.worker, svc.runShared)
 	return svc
 }
 
 // ProvideAccountExpiryService creates and starts AccountExpiryService.
 func ProvideAccountExpiryService(accountRepo AccountRepository, tasks *SharedTaskGate) *AccountExpiryService {
 	svc := NewAccountExpiryService(accountRepo, time.Minute)
-	tasks.Start(svc.Start)
+	tasks.registerWorker(&svc.worker, svc.runShared)
 	return svc
 }
 
@@ -421,7 +422,7 @@ func ProvideOpenAICodexVersionSyncService(
 	tasks *SharedTaskGate,
 ) *OpenAICodexVersionSyncService {
 	svc := NewOpenAICodexVersionSyncService(settingRepo, settingService, githubClient, openAICodexVersionSyncInterval)
-	tasks.Start(svc.Start)
+	tasks.registerWorker(&svc.worker, svc.runShared)
 	return svc
 }
 
@@ -434,14 +435,14 @@ func ProvideClaudeCodeVersionSyncService(
 	tasks *SharedTaskGate,
 ) *ClaudeCodeVersionSyncService {
 	svc := NewClaudeCodeVersionSyncService(settingRepo, settingService, githubClient, claudeCodeVersionSyncInterval)
-	tasks.Start(svc.Start)
+	tasks.registerWorker(&svc.worker, svc.runShared)
 	return svc
 }
 
 // ProvideProxyExpiryService creates and starts ProxyExpiryService.
 func ProvideProxyExpiryService(proxyRepo ProxyRepository, tasks *SharedTaskGate) *ProxyExpiryService {
 	svc := NewProxyExpiryService(proxyRepo, time.Minute)
-	tasks.Start(svc.Start)
+	tasks.registerWorker(&svc.worker, svc.runShared)
 	return svc
 }
 
@@ -451,7 +452,7 @@ func ProvideSubscriptionExpiryService(userSubRepo UserSubscriptionRepository, se
 	svc.SetSettingRepository(settingRepo)
 	svc.SetNotificationEmailService(notificationEmailService)
 	svc.SetLeaderLock(lockCache, db)
-	tasks.Start(svc.Start)
+	tasks.registerWorker(&svc.worker, svc.runShared)
 	return svc
 }
 
@@ -478,12 +479,17 @@ func ProvideConcurrencyService(cache ConcurrencyCache, accountRepo AccountReposi
 	if cfg != nil {
 		svc.SetAccountLoadBatchCacheTTL(time.Duration(cfg.Gateway.Scheduling.LoadBatchCacheTTLMS) * time.Millisecond)
 	}
-	tasks.Start(func() {
-		if err := svc.CleanupStaleProcessSlots(context.Background()); err != nil {
-			logger.LegacyPrintf("service.concurrency", "Warning: startup cleanup stale process slots failed: %v", err)
+	tasks.registerWorker(&svc.slotCleanupWorker, func(ctx context.Context) {
+		// Startup sweep removes other request prefixes, so it is only safe in standalone.
+		if cfg == nil || !cfg.EntryNode.ClusterEnabled {
+			cleanupCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			if err := svc.CleanupStaleProcessSlots(cleanupCtx); err != nil {
+				logger.LegacyPrintf("service.concurrency", "Warning: startup cleanup stale process slots failed: %v", err)
+			}
+			cancel()
 		}
 		if cfg != nil {
-			svc.StartSlotCleanupWorker(accountRepo, cfg.Gateway.Scheduling.SlotCleanupInterval)
+			svc.runSlotCleanupWorker(ctx, cfg.Gateway.Scheduling.SlotCleanupInterval)
 		}
 	})
 	return svc
@@ -492,8 +498,8 @@ func ProvideConcurrencyService(cache ConcurrencyCache, accountRepo AccountReposi
 // ProvideUserMessageQueueService 创建用户消息串行队列服务并启动清理 worker
 func ProvideUserMessageQueueService(cache UserMsgQueueCache, rpmCache RPMCache, cfg *config.Config, tasks *SharedTaskGate) *UserMessageQueueService {
 	svc := NewUserMessageQueueService(cache, rpmCache, &cfg.Gateway.UserMessageQueue)
-	if tasks.Running() && cfg.Gateway.UserMessageQueue.CleanupIntervalSeconds > 0 {
-		svc.StartCleanupWorker(time.Duration(cfg.Gateway.UserMessageQueue.CleanupIntervalSeconds) * time.Second)
+	if interval := time.Duration(cfg.Gateway.UserMessageQueue.CleanupIntervalSeconds) * time.Second; interval > 0 {
+		tasks.registerWorker(&svc.cleanupWorker, func(ctx context.Context) { svc.runCleanupWorker(ctx, interval) })
 	}
 	return svc
 }
@@ -508,7 +514,7 @@ func ProvideSchedulerSnapshotService(
 	tasks *SharedTaskGate,
 ) *SchedulerSnapshotService {
 	svc := NewSchedulerSnapshotService(cache, outboxRepo, accountRepo, groupRepo, cfg)
-	tasks.Start(svc.Start)
+	tasks.registerWorker(&svc.worker, svc.runShared)
 	return svc
 }
 
@@ -549,7 +555,7 @@ func ProvideOpsMetricsCollector(
 	gate *SharedTaskGate,
 ) *OpsMetricsCollector {
 	collector := NewOpsMetricsCollector(opsRepo, settingRepo, accountRepo, concurrencyService, db, redisClient, cfg)
-	gate.Start(collector.Start)
+	gate.registerWorker(&collector.worker, collector.runShared)
 	return collector
 }
 
@@ -563,7 +569,7 @@ func ProvideOpsAggregationService(
 	tasks *SharedTaskGate,
 ) *OpsAggregationService {
 	svc := NewOpsAggregationService(opsRepo, settingRepo, db, redisClient, cfg)
-	tasks.Start(svc.Start)
+	tasks.registerWorker(&svc.worker, svc.runShared)
 	return svc
 }
 
@@ -578,7 +584,7 @@ func ProvideOpsAlertEvaluatorService(
 	tasks *SharedTaskGate,
 ) *OpsAlertEvaluatorService {
 	svc := NewOpsAlertEvaluatorService(opsService, opsRepo, emailService, redisClient, cfg, proxyRepo)
-	tasks.Start(svc.Start)
+	tasks.registerWorker(&svc.worker, svc.runShared)
 	return svc
 }
 
@@ -598,8 +604,8 @@ func ProvideOpsCleanupService(
 	tasks *SharedTaskGate,
 ) *OpsCleanupService {
 	svc := NewOpsCleanupService(opsRepo, db, redisClient, cfg, channelMonitorSvc, settingRepo)
-	tasks.Start(svc.Start)
-	if tasks.Running() && opsService != nil {
+	tasks.RegisterLifecycle(svc.startContext, svc.Stop)
+	if opsService != nil {
 		opsService.SetCleanupReloader(svc)
 	}
 	return svc
@@ -616,7 +622,8 @@ func ProvideOpsSystemLogSink(opsRepo OpsRepository) *OpsSystemLogSink {
 // 停止逻辑挂在 cmd/server 的 provideCleanup。
 func ProvideAuditLogService(repo AuditLogRepository, settingService *SettingService, tasks *SharedTaskGate) *AuditLogService {
 	svc := NewAuditLogService(repo, settingService)
-	svc.start(tasks.Running())
+	svc.start(false)
+	tasks.registerWorker(&svc.retention, svc.runRetentionLoop)
 	return svc
 }
 
@@ -655,14 +662,14 @@ func ProvideSystemOperationLockService(repo IdempotencyRepository, cfg *config.C
 
 func ProvideIdempotencyCleanupService(repo IdempotencyRepository, cfg *config.Config, tasks *SharedTaskGate) *IdempotencyCleanupService {
 	svc := NewIdempotencyCleanupService(repo, cfg)
-	tasks.Start(svc.Start)
+	tasks.registerWorker(&svc.worker, svc.runShared)
 	return svc
 }
 
 // ProvideGeminiCachedContentService creates GeminiCachedContentService and starts its mutation recovery loop.
 func ProvideGeminiCachedContentService(repo GeminiCachedContentRepository, compat *GeminiMessagesCompatService, cfg *config.Config, tasks *SharedTaskGate) *GeminiCachedContentService {
 	svc := NewGeminiCachedContentService(repo, compat, cfg)
-	tasks.Start(svc.Start)
+	tasks.registerWorker(&svc.worker, svc.runMutationRecovery)
 	return svc
 }
 
@@ -684,7 +691,7 @@ func ProvideScheduledTestRunnerService(
 	tasks *SharedTaskGate,
 ) *ScheduledTestRunnerService {
 	svc := NewScheduledTestRunnerService(planRepo, scheduledSvc, accountTestSvc, rateLimitSvc, cfg)
-	tasks.Start(svc.Start)
+	tasks.registerWorker(&svc.worker, svc.runShared)
 	return svc
 }
 
@@ -698,7 +705,7 @@ func ProvideOpsScheduledReportService(
 	tasks *SharedTaskGate,
 ) *OpsScheduledReportService {
 	svc := NewOpsScheduledReportService(opsService, userService, emailService, redisClient, cfg)
-	tasks.Start(svc.Start)
+	tasks.registerWorker(&svc.worker, svc.runShared)
 	return svc
 }
 
@@ -752,7 +759,7 @@ func ProvideBackupService(
 	svc := NewBackupService(settingRepo, cfg, encryptor, storeFactory, dumper)
 	svc.SetLeaderLock(lockCache, db)
 	svc.scheduledTasks = tasks
-	tasks.Start(svc.Start)
+	tasks.registerWorker(&svc.scheduled, svc.runScheduledTasks)
 	return svc
 }
 
@@ -1055,7 +1062,7 @@ func ProvidePaymentService(entClient *dbent.Client, registry *payment.Registry, 
 func ProvidePaymentOrderExpiryService(paymentSvc *PaymentService, lockCache LeaderLockCache, db *sql.DB, tasks *SharedTaskGate) *PaymentOrderExpiryService {
 	svc := NewPaymentOrderExpiryService(paymentSvc, 60*time.Second)
 	svc.SetLeaderLock(lockCache, db)
-	tasks.Start(svc.Start)
+	tasks.registerWorker(&svc.worker, svc.runShared)
 	return svc
 }
 
@@ -1089,12 +1096,10 @@ func ProvideChannelMonitorRunner(
 		// Ensure runtime reader is set even if ProvideChannelMonitorService
 		// was constructed without settings (tests / alternate providers).
 		svc.SetRuntimeReader(settingService)
-		if tasks.Running() {
-			svc.SetScheduler(r)
-		}
+		svc.SetScheduler(r)
 		svc.SetQuotaFetcher(quotaFetcher)
 	}
-	tasks.Start(r.Start)
+	tasks.RegisterLifecycle(r.startContext, r.Stop)
 	return r
 }
 
@@ -1114,7 +1119,7 @@ func ProvideChannelMonitorV2Aggregator(repo ChannelMonitorV2Repository, db *sql.
 	if os.Getenv("CHANNEL_MONITOR_V2_DISABLE_AGGREGATOR") == "1" {
 		return aggregator
 	}
-	tasks.Start(aggregator.Start)
+	tasks.registerWorker(&aggregator.worker, aggregator.runShared)
 	return aggregator
 }
 

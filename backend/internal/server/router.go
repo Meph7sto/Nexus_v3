@@ -90,6 +90,9 @@ func SetupRouter(
 	} else {
 		settingService.SetOnUpdateCallback(refreshFrameOrigins)
 	}
+	if cfg.EntryNode.ClusterEnabled && redisClient != nil {
+		settingService.StartSettingsBroadcast(redisClient)
+	}
 
 	// 注册路由
 	registerRoutes(r, handlers, jwtAuth, optionalJWTAuth, adminAuth, adminPermission, apiKeyAuth, auditLog, stepUpAuth, apiKeyService, subscriptionService, opsService, settingService, adminPermissionRepo, compositeResolver, cfg, redisClient)

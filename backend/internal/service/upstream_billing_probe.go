@@ -243,19 +243,14 @@ type UpstreamBillingProbeService struct {
 	accountTestService *AccountTestService
 	settingService     *SettingService
 
-	parentCtx    context.Context
-	parentCancel context.CancelFunc
-	wg           sync.WaitGroup
-	mu           sync.Mutex
-	started      bool
-	stopped      bool
-	cycleMu      sync.Mutex
-	probeGroup   singleflight.Group
-	probeSlots   chan struct{}
-	now          func() time.Time
-	lockCache    LeaderLockCache
-	db           *sql.DB
-	instanceID   string
+	worker     sharedTaskRunner
+	cycleMu    sync.Mutex
+	probeGroup singleflight.Group
+	probeSlots chan struct{}
+	now        func() time.Time
+	lockCache  LeaderLockCache
+	db         *sql.DB
+	instanceID string
 }
 
 type upstreamBillingProbeSnapshotWriter interface {
@@ -271,13 +266,10 @@ func NewUpstreamBillingProbeService(
 	accountTestService *AccountTestService,
 	settingService *SettingService,
 ) *UpstreamBillingProbeService {
-	ctx, cancel := context.WithCancel(context.Background())
 	return &UpstreamBillingProbeService{
 		accountRepo:        accountRepo,
 		accountTestService: accountTestService,
 		settingService:     settingService,
-		parentCtx:          ctx,
-		parentCancel:       cancel,
 		probeSlots:         make(chan struct{}, upstreamBillingProbeConcurrency),
 		now:                time.Now,
 		instanceID:         uuid.NewString(),
@@ -303,55 +295,29 @@ func ProvideUpstreamBillingProbeService(
 ) *UpstreamBillingProbeService {
 	svc := NewUpstreamBillingProbeService(accountRepo, accountTestService, settingService)
 	svc.SetLeaderLock(lockCache, db)
-	tasks.Start(svc.Start)
+	tasks.registerWorker(&svc.worker, svc.runShared)
 	return svc
 }
 
 func (s *UpstreamBillingProbeService) Start() {
-	if s == nil {
-		return
+	if s != nil {
+		s.worker.start(context.Background(), s.runShared)
 	}
-	s.mu.Lock()
-	if s.started || s.stopped {
-		s.mu.Unlock()
-		return
-	}
-	s.started = true
-	s.wg.Add(1)
-	s.mu.Unlock()
-	go s.runLoop()
 }
 
 func (s *UpstreamBillingProbeService) Stop() {
-	if s == nil {
-		return
+	if s != nil {
+		s.worker.stop()
 	}
-	s.mu.Lock()
-	if s.stopped {
-		s.mu.Unlock()
-		return
-	}
-	s.stopped = true
-	s.parentCancel()
-	s.mu.Unlock()
-	s.wg.Wait()
 }
 
-func (s *UpstreamBillingProbeService) runLoop() {
-	defer s.wg.Done()
-	_ = s.RunDue(s.parentCtx)
-	ticker := time.NewTicker(upstreamBillingProbeCycleInterval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-s.parentCtx.Done():
-			return
-		case <-ticker.C:
-			if err := s.RunDue(s.parentCtx); err != nil {
-				logger.LegacyPrintf("service.upstream_billing_probe", "run_due_failed: err=%v", err)
-			}
+func (s *UpstreamBillingProbeService) runShared(ctx context.Context) {
+	_ = s.RunDue(ctx)
+	runSharedPeriodic(ctx, upstreamBillingProbeCycleInterval, false, func(ctx context.Context) {
+		if err := s.RunDue(ctx); err != nil && ctx.Err() == nil {
+			logger.LegacyPrintf("service.upstream_billing_probe", "run_due_failed: err=%v", err)
 		}
-	}
+	})
 }
 
 // RunDue executes at most one bounded batch of due accounts.

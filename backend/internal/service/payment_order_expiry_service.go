@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"log/slog"
-	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -25,9 +24,7 @@ const (
 type PaymentOrderExpiryService struct {
 	paymentSvc *PaymentService
 	interval   time.Duration
-	stopCh     chan struct{}
-	stopOnce   sync.Once
-	wg         sync.WaitGroup
+	worker     sharedTaskRunner
 
 	lockCache  LeaderLockCache
 	db         *sql.DB
@@ -38,7 +35,6 @@ func NewPaymentOrderExpiryService(paymentSvc *PaymentService, interval time.Dura
 	return &PaymentOrderExpiryService{
 		paymentSvc: paymentSvc,
 		interval:   interval,
-		stopCh:     make(chan struct{}),
 		instanceID: uuid.NewString(),
 	}
 }
@@ -55,41 +51,28 @@ func (s *PaymentOrderExpiryService) SetLeaderLock(lockCache LeaderLockCache, db 
 }
 
 func (s *PaymentOrderExpiryService) Start() {
-	if s == nil || s.paymentSvc == nil || s.interval <= 0 {
-		return
+	if s != nil {
+		s.worker.start(context.Background(), s.runShared)
 	}
-	s.wg.Add(1)
-	go func() {
-		defer s.wg.Done()
-		ticker := time.NewTicker(s.interval)
-		defer ticker.Stop()
-
-		s.runOnce()
-		for {
-			select {
-			case <-ticker.C:
-				s.runOnce()
-			case <-s.stopCh:
-				return
-			}
-		}
-	}()
 }
 
 func (s *PaymentOrderExpiryService) Stop() {
-	if s == nil {
-		return
+	if s != nil {
+		s.worker.stop()
 	}
-	s.stopOnce.Do(func() {
-		close(s.stopCh)
-	})
-	s.wg.Wait()
 }
 
-func (s *PaymentOrderExpiryService) runOnce() {
+func (s *PaymentOrderExpiryService) runShared(ctx context.Context) {
+	if s == nil || s.paymentSvc == nil || s.interval <= 0 {
+		return
+	}
+	runSharedPeriodic(ctx, s.interval, true, s.runOnceContext)
+}
+
+func (s *PaymentOrderExpiryService) runOnceContext(parent context.Context) {
 	// Multi-instance guard: only the leader reconciles/expires orders per cycle,
 	// avoiding N× upstream payment-provider API calls and update races.
-	lockCtx, lockCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	lockCtx, lockCancel := context.WithTimeout(parent, 2*time.Second)
 	release, ok := tryAcquireSingletonLeaderLock(lockCtx, s.lockCache, s.db, paymentOrderExpiryLeaderLockKey, s.instanceID, paymentOrderExpiryLeaderLockTTL)
 	lockCancel()
 	if !ok {
@@ -97,7 +80,7 @@ func (s *PaymentOrderExpiryService) runOnce() {
 	}
 	defer release()
 
-	reconcileCtx, cancel := context.WithTimeout(context.Background(), expiryCheckTimeout)
+	reconcileCtx, cancel := context.WithTimeout(parent, expiryCheckTimeout)
 	recovered, err := s.paymentSvc.ReconcilePendingPaymentOrders(reconcileCtx)
 	cancel()
 	if err != nil {
@@ -106,7 +89,7 @@ func (s *PaymentOrderExpiryService) runOnce() {
 		slog.Info("[PaymentOrderExpiry] reconciled paid orders", "count", recovered)
 	}
 
-	expireCtx, cancel := context.WithTimeout(context.Background(), expiryCheckTimeout)
+	expireCtx, cancel := context.WithTimeout(parent, expiryCheckTimeout)
 	defer cancel()
 	expired, err := s.paymentSvc.ExpireTimedOutOrders(expireCtx)
 	if err != nil {

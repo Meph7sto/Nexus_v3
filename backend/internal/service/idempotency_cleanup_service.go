@@ -2,7 +2,6 @@ package service
 
 import (
 	"context"
-	"sync"
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
@@ -13,11 +12,8 @@ import (
 type IdempotencyCleanupService struct {
 	repo     IdempotencyRepository
 	interval time.Duration
+	worker   sharedTaskRunner
 	batch    int
-
-	startOnce sync.Once
-	stopOnce  sync.Once
-	stopCh    chan struct{}
 }
 
 func NewIdempotencyCleanupService(repo IdempotencyRepository, cfg *config.Config) *IdempotencyCleanupService {
@@ -35,49 +31,34 @@ func NewIdempotencyCleanupService(repo IdempotencyRepository, cfg *config.Config
 		repo:     repo,
 		interval: interval,
 		batch:    batch,
-		stopCh:   make(chan struct{}),
 	}
 }
 
 func (s *IdempotencyCleanupService) Start() {
-	if s == nil || s.repo == nil {
-		return
+	if s != nil {
+		s.worker.start(context.Background(), s.runShared)
 	}
-	s.startOnce.Do(func() {
-		logger.LegacyPrintf("service.idempotency_cleanup", "[IdempotencyCleanup] started interval=%s batch=%d", s.interval, s.batch)
-		go s.runLoop()
-	})
 }
 
 func (s *IdempotencyCleanupService) Stop() {
-	if s == nil {
-		return
+	if s != nil {
+		s.worker.stop()
 	}
-	s.stopOnce.Do(func() {
-		close(s.stopCh)
-		logger.LegacyPrintf("service.idempotency_cleanup", "[IdempotencyCleanup] stopped")
-	})
 }
 
-func (s *IdempotencyCleanupService) runLoop() {
-	ticker := time.NewTicker(s.interval)
-	defer ticker.Stop()
-
-	// 启动后先清理一轮，防止重启后积压。
-	s.cleanupOnce()
-
-	for {
-		select {
-		case <-ticker.C:
-			s.cleanupOnce()
-		case <-s.stopCh:
-			return
-		}
+func (s *IdempotencyCleanupService) runShared(ctx context.Context) {
+	if s == nil || s.repo == nil {
+		return
 	}
+	runSharedPeriodic(ctx, s.interval, true, s.cleanupOnceContext)
 }
 
 func (s *IdempotencyCleanupService) cleanupOnce() {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	s.cleanupOnceContext(context.Background())
+}
+
+func (s *IdempotencyCleanupService) cleanupOnceContext(parent context.Context) {
+	ctx, cancel := context.WithTimeout(parent, 10*time.Second)
 	defer cancel()
 
 	deleted, err := s.repo.DeleteExpired(ctx, time.Now(), s.batch)

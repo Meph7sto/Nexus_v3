@@ -31,9 +31,7 @@ type SubscriptionExpiryService struct {
 	settingRepo              SettingRepository
 	notificationEmailService *NotificationEmailService
 	interval                 time.Duration
-	stopCh                   chan struct{}
-	stopOnce                 sync.Once
-	wg                       sync.WaitGroup
+	worker                   sharedTaskRunner
 
 	lockCache  LeaderLockCache
 	db         *sql.DB
@@ -47,7 +45,6 @@ func NewSubscriptionExpiryService(userSubRepo UserSubscriptionRepository, interv
 	return &SubscriptionExpiryService{
 		userSubRepo: userSubRepo,
 		interval:    interval,
-		stopCh:      make(chan struct{}),
 		instanceID:  uuid.NewString(),
 	}
 }
@@ -72,39 +69,26 @@ func (s *SubscriptionExpiryService) SetNotificationEmailService(notificationEmai
 }
 
 func (s *SubscriptionExpiryService) Start() {
-	if s == nil || s.userSubRepo == nil || s.interval <= 0 {
-		return
+	if s != nil {
+		s.worker.start(context.Background(), s.runShared)
 	}
-	s.wg.Add(1)
-	go func() {
-		defer s.wg.Done()
-		ticker := time.NewTicker(s.interval)
-		defer ticker.Stop()
-
-		s.runOnce()
-		for {
-			select {
-			case <-ticker.C:
-				s.runOnce()
-			case <-s.stopCh:
-				return
-			}
-		}
-	}()
 }
 
 func (s *SubscriptionExpiryService) Stop() {
-	if s == nil {
-		return
+	if s != nil {
+		s.worker.stop()
 	}
-	s.stopOnce.Do(func() {
-		close(s.stopCh)
-	})
-	s.wg.Wait()
 }
 
-func (s *SubscriptionExpiryService) runOnce() {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+func (s *SubscriptionExpiryService) runShared(ctx context.Context) {
+	if s == nil || s.userSubRepo == nil || s.interval <= 0 {
+		return
+	}
+	runSharedPeriodic(ctx, s.interval, true, s.runOnceContext)
+}
+
+func (s *SubscriptionExpiryService) runOnceContext(parent context.Context) {
+	ctx, cancel := context.WithTimeout(parent, 10*time.Second)
 	defer cancel()
 
 	updated, err := s.userSubRepo.BatchUpdateExpiredStatus(ctx)

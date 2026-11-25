@@ -244,11 +244,10 @@ func (s *OpsService) applyRuntimeLogConfig(cfg *OpsRuntimeLogConfig) error {
 }
 
 func (s *OpsService) reloadOpsCleanup(ctx context.Context) {
-	if s == nil || s.cleanupReloader == nil {
-		return
-	}
-	if err := s.cleanupReloader.Reload(ctx); err != nil {
-		logger.LegacyPrintf("service.ops_log_runtime", "[OpsLogRuntime] cleanup reload failed: %v", err)
+	if reloader := s.getCleanupReloader(); reloader != nil {
+		if err := reloader.Reload(ctx); err != nil {
+			logger.LegacyPrintf("service.ops_log_runtime", "[OpsLogRuntime] cleanup reload failed: %v", err)
+		}
 	}
 }
 

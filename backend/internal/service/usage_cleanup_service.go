@@ -18,10 +18,6 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/pagination"
 )
 
-const (
-	usageCleanupWorkerName = "usage_cleanup_worker"
-)
-
 // UsageCleanupService 负责创建与执行使用记录清理任务
 type UsageCleanupService struct {
 	repo         UsageCleanupRepository
@@ -30,23 +26,16 @@ type UsageCleanupService struct {
 	interactions *UsageInteractionService
 	cfg          *config.Config
 
-	running   int32
-	startOnce sync.Once
-	stopOnce  sync.Once
-
-	workerCtx    context.Context
-	workerCancel context.CancelFunc
+	running int32
+	worker  sharedTaskRunner
 }
 
 func NewUsageCleanupService(repo UsageCleanupRepository, timingWheel *TimingWheelService, dashboard *DashboardAggregationService, cfg *config.Config) *UsageCleanupService {
-	workerCtx, workerCancel := context.WithCancel(context.Background())
 	return &UsageCleanupService{
-		repo:         repo,
-		timingWheel:  timingWheel,
-		dashboard:    dashboard,
-		cfg:          cfg,
-		workerCtx:    workerCtx,
-		workerCancel: workerCancel,
+		repo:        repo,
+		timingWheel: timingWheel,
+		dashboard:   dashboard,
+		cfg:         cfg,
 	}
 }
 
@@ -88,6 +77,12 @@ func describeUsageCleanupFilters(filters UsageCleanupFilters) string {
 }
 
 func (s *UsageCleanupService) Start() {
+	if s != nil {
+		s.worker.start(context.Background(), s.runShared)
+	}
+}
+
+func (s *UsageCleanupService) runShared(ctx context.Context) {
 	if s == nil {
 		return
 	}
@@ -101,25 +96,22 @@ func (s *UsageCleanupService) Start() {
 	}
 
 	interval := s.workerInterval()
-	s.startOnce.Do(func() {
-		s.timingWheel.ScheduleRecurring(usageCleanupWorkerName, interval, s.runOnce)
-		logger.LegacyPrintf("service.usage_cleanup", "[UsageCleanup] started (interval=%s max_range_days=%d batch_size=%d task_timeout=%s)", interval, s.maxRangeDays(), s.batchSize(), s.taskTimeout())
-	})
+	logger.LegacyPrintf("service.usage_cleanup", "[UsageCleanup] started (interval=%s max_range_days=%d batch_size=%d task_timeout=%s)", interval, s.maxRangeDays(), s.batchSize(), s.taskTimeout())
+	defer logger.LegacyPrintf("service.usage_cleanup", "[UsageCleanup] stopped")
+	var recomputes sync.WaitGroup
+	defer recomputes.Wait()
+	for ctx.Err() == nil {
+		sleepOrDone(ctx, interval)
+		if ctx.Err() == nil {
+			s.runOnceContext(ctx, recomputes.Go)
+		}
+	}
 }
 
 func (s *UsageCleanupService) Stop() {
-	if s == nil {
-		return
+	if s != nil {
+		s.worker.stop()
 	}
-	s.stopOnce.Do(func() {
-		if s.workerCancel != nil {
-			s.workerCancel()
-		}
-		if s.timingWheel != nil {
-			s.timingWheel.Cancel(usageCleanupWorkerName)
-		}
-		logger.LegacyPrintf("service.usage_cleanup", "[UsageCleanup] stopped")
-	})
 }
 
 func (s *UsageCleanupService) ListTasks(ctx context.Context, params pagination.PaginationParams) ([]UsageCleanupTask, *pagination.PaginationResult, error) {
@@ -162,6 +154,10 @@ func (s *UsageCleanupService) CreateTask(ctx context.Context, filters UsageClean
 }
 
 func (s *UsageCleanupService) runOnce() {
+	s.runOnceContext(context.Background(), func(run func()) { go run() })
+}
+
+func (s *UsageCleanupService) runOnceContext(parent context.Context, launchRecompute func(func())) {
 	svc := s
 	if svc == nil {
 		return
@@ -172,10 +168,6 @@ func (s *UsageCleanupService) runOnce() {
 	}
 	defer atomic.StoreInt32(&svc.running, 0)
 
-	parent := context.Background()
-	if svc.workerCtx != nil {
-		parent = svc.workerCtx
-	}
 	ctx, cancel := context.WithTimeout(parent, svc.taskTimeout())
 	defer cancel()
 	svc.cleanupExpiredInteractions(ctx)
@@ -191,7 +183,7 @@ func (s *UsageCleanupService) runOnce() {
 	}
 
 	logger.LegacyPrintf("service.usage_cleanup", "[UsageCleanup] task claimed: task=%d status=%s created_by=%d deleted_rows=%d %s", task.ID, task.Status, task.CreatedBy, task.DeletedRows, describeUsageCleanupFilters(task.Filters))
-	svc.executeTask(ctx, task)
+	svc.executeTaskContext(ctx, parent, task, launchRecompute)
 }
 
 func (s *UsageCleanupService) cleanupExpiredInteractions(ctx context.Context) {
@@ -209,6 +201,10 @@ func (s *UsageCleanupService) cleanupExpiredInteractions(ctx context.Context) {
 }
 
 func (s *UsageCleanupService) executeTask(ctx context.Context, task *UsageCleanupTask) {
+	s.executeTaskContext(ctx, ctx, task, func(run func()) { go run() })
+}
+
+func (s *UsageCleanupService) executeTaskContext(ctx, parent context.Context, task *UsageCleanupTask, launchRecompute func(func())) {
 	if task == nil {
 		return
 	}
@@ -226,7 +222,9 @@ func (s *UsageCleanupService) executeTask(ctx context.Context, task *UsageCleanu
 		}
 		canceled, err := s.isTaskCanceled(ctx, task.ID)
 		if err != nil {
-			s.markTaskFailed(task.ID, deletedTotal, err)
+			if ctx.Err() == nil {
+				s.markTaskFailed(parent, task.ID, deletedTotal, err)
+			}
 			return
 		}
 		if canceled {
@@ -242,12 +240,12 @@ func (s *UsageCleanupService) executeTask(ctx context.Context, task *UsageCleanu
 				logger.LegacyPrintf("service.usage_cleanup", "[UsageCleanup] task interrupted: task=%d err=%v", task.ID, err)
 				return
 			}
-			s.markTaskFailed(task.ID, deletedTotal, err)
+			s.markTaskFailed(parent, task.ID, deletedTotal, err)
 			return
 		}
 		deletedTotal += deleted
 		if deleted > 0 {
-			updateCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			updateCtx, cancel := context.WithTimeout(parent, 3*time.Second)
 			if err := s.repo.UpdateTaskProgress(updateCtx, task.ID, deletedTotal); err != nil {
 				logger.LegacyPrintf("service.usage_cleanup", "[UsageCleanup] task progress update failed: task=%d deleted_rows=%d err=%v", task.ID, deletedTotal, err)
 			}
@@ -261,30 +259,37 @@ func (s *UsageCleanupService) executeTask(ctx context.Context, task *UsageCleanu
 		}
 	}
 
-	updateCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if err := s.repo.MarkTaskSucceeded(updateCtx, task.ID, deletedTotal); err != nil {
+	updateCtx, cancel := context.WithTimeout(parent, 5*time.Second)
+	err := s.repo.MarkTaskSucceeded(updateCtx, task.ID, deletedTotal)
+	cancel()
+	if err != nil {
 		logger.LegacyPrintf("service.usage_cleanup", "[UsageCleanup] update task succeeded failed: task=%d err=%v", task.ID, err)
 	} else {
 		logger.LegacyPrintf("service.usage_cleanup", "[UsageCleanup] task succeeded: task=%d deleted_rows=%d duration=%s", task.ID, deletedTotal, time.Since(start))
 	}
 
-	if s.dashboard != nil {
-		if err := s.dashboard.TriggerRecomputeRange(task.Filters.StartTime, task.Filters.EndTime); err != nil {
+	if s.dashboard != nil && parent.Err() == nil {
+		start, end := task.Filters.StartTime, task.Filters.EndTime
+		if err := s.dashboard.validateRecomputeRange(start, end); err != nil {
 			logger.LegacyPrintf("service.usage_cleanup", "[UsageCleanup] trigger dashboard recompute failed: task=%d err=%v", task.ID, err)
 		} else {
+			launchRecompute(func() {
+				if err := s.dashboard.recomputeRangeWithRetry(parent, start, end); err != nil && parent.Err() == nil {
+					logger.LegacyPrintf("service.usage_cleanup", "[UsageCleanup] dashboard recompute failed: task=%d err=%v", task.ID, err)
+				}
+			})
 			logger.LegacyPrintf("service.usage_cleanup", "[UsageCleanup] trigger dashboard recompute: task=%d start=%s end=%s", task.ID, task.Filters.StartTime.UTC().Format(time.RFC3339), task.Filters.EndTime.UTC().Format(time.RFC3339))
 		}
 	}
 }
 
-func (s *UsageCleanupService) markTaskFailed(taskID int64, deletedRows int64, err error) {
+func (s *UsageCleanupService) markTaskFailed(parent context.Context, taskID int64, deletedRows int64, err error) {
 	msg := strings.TrimSpace(err.Error())
 	if len(msg) > 500 {
 		msg = msg[:500]
 	}
 	logger.LegacyPrintf("service.usage_cleanup", "[UsageCleanup] task failed: task=%d deleted_rows=%d err=%s", taskID, deletedRows, msg)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(parent, 5*time.Second)
 	defer cancel()
 	if updateErr := s.repo.MarkTaskFailed(ctx, taskID, deletedRows, msg); updateErr != nil {
 		logger.LegacyPrintf("service.usage_cleanup", "[UsageCleanup] update task failed failed: task=%d err=%v", taskID, updateErr)
@@ -295,7 +300,7 @@ func (s *UsageCleanupService) isTaskCanceled(ctx context.Context, taskID int64) 
 	if s == nil || s.repo == nil {
 		return false, fmt.Errorf("cleanup service not ready")
 	}
-	checkCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	checkCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 	status, err := s.repo.GetTaskStatus(checkCtx, taskID)
 	if err != nil {

@@ -71,7 +71,7 @@ func (c *EntryNodeConfig) validate() error {
 		}
 		return nil
 	}
-	if !safeEntryID.MatchString(c.ID) || !safeEntryID.MatchString(c.SharedTaskOwnerID) {
+	if !safeEntryID.MatchString(c.ID) || (c.SharedTaskOwnerID != "" && !safeEntryID.MatchString(c.SharedTaskOwnerID)) {
 		return fmt.Errorf("entry_node.id and shared_task_owner_id must be valid identifiers")
 	}
 	if len(c.Name) > 128 {

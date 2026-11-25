@@ -180,6 +180,8 @@ type BackupService struct {
 	cronMu      sync.Mutex
 	cronSched   *cron.Cron
 	cronEntryID cron.EntryID
+	cronContext context.Context
+	scheduled   sharedTaskRunner
 
 	// lockCache/db elect a single leader for the scheduled backup across
 	// instances; instanceID identifies this process as the lock owner. Injected
@@ -231,34 +233,53 @@ func (s *BackupService) SetLeaderLock(lockCache LeaderLockCache, db *sql.DB) {
 
 // Start 启动定时备份调度器并清理孤立记录
 func (s *BackupService) Start() {
-	s.cronSched = cron.New()
+	s.scheduled.start(s.bgCtx, s.runScheduledTasks)
+}
+
+func (s *BackupService) runScheduledTasks(parent context.Context) {
+	c := cron.New()
 	// A recently interrupted job may still belong to a live peer. Revisit it
 	// after the maximum execution window rather than deleting it at startup.
-	_, _ = s.cronSched.AddFunc("@every 5m", s.recoverStaleRecords)
-	s.cronSched.Start()
+	_, _ = c.AddFunc("@every 5m", func() { s.recoverStaleRecordsContext(parent) })
+	s.cronMu.Lock()
+	s.cronSched, s.cronContext = c, parent
+	c.Start()
+	s.cronMu.Unlock()
+	defer func() {
+		s.cronMu.Lock()
+		s.cronSched, s.cronContext, s.cronEntryID = nil, nil, 0
+		s.cronMu.Unlock()
+		<-c.Stop().Done()
+	}()
 
 	// 清理重启后孤立的 running 记录
-	s.recoverStaleRecords()
+	s.recoverStaleRecordsContext(parent)
 
 	// 加载已有的定时配置
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
+	ctx, cancel := context.WithTimeout(parent, 10*time.Second)
 	schedule, err := s.GetSchedule(ctx)
+	cancel()
 	if err != nil {
 		logger.LegacyPrintf("service.backup", "[Backup] 加载定时备份配置失败: %v", err)
-		return
-	}
-	if schedule.Enabled && schedule.CronExpr != "" {
+	} else if schedule.Enabled && schedule.CronExpr != "" {
 		if err := s.applyCronSchedule(schedule); err != nil {
 			logger.LegacyPrintf("service.backup", "[Backup] 应用定时备份配置失败: %v", err)
 		}
 	}
+	<-parent.Done()
 }
 
 // recoverStaleRecords expires interrupted operations only after their maximum
 // runtime. Re-read, status persistence and object deletion share the writer lock.
 func (s *BackupService) recoverStaleRecords() {
-	ctx, cancel := context.WithTimeout(s.bgCtx, 5*time.Minute)
+	s.recoverStaleRecordsContext(s.bgCtx)
+}
+
+func (s *BackupService) recoverStaleRecordsContext(parent context.Context) {
+	if parent.Err() != nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(parent, 5*time.Minute)
 	defer cancel()
 	ctx, release, err := s.lockBackupRecordUpdates(ctx)
 	if err != nil {
@@ -334,20 +355,11 @@ func (s *BackupService) cleanupStaleBackupObjects(ctx context.Context, record *B
 // Stop 停止定时备份并等待活跃操作完成
 func (s *BackupService) Stop() {
 	s.shuttingDown.Store(true)
-
-	var cronStopped context.Context
-	s.cronMu.Lock()
-	if s.cronSched != nil {
-		cronStopped = s.cronSched.Stop()
-	}
-	s.cronMu.Unlock()
+	s.scheduled.stop()
 
 	// 等待活跃备份/恢复完成（最多 5 分钟）
 	done := make(chan struct{})
 	go func() {
-		if cronStopped != nil {
-			<-cronStopped.Done()
-		}
 		s.wg.Wait()
 		close(done)
 	}()
@@ -517,6 +529,11 @@ func (s *BackupService) applyCronSchedule(cfg *BackupScheduleConfig) error {
 	defer s.cronMu.Unlock()
 
 	if s.cronSched == nil {
+		if s.scheduledTasks != nil {
+			// A lease can change after the settings write. The new scheduler
+			// reads the persisted schedule as it starts.
+			return nil
+		}
 		return fmt.Errorf("cron scheduler not initialized")
 	}
 
@@ -526,8 +543,9 @@ func (s *BackupService) applyCronSchedule(cfg *BackupScheduleConfig) error {
 		s.cronEntryID = 0
 	}
 
+	parent := s.cronContext
 	entryID, err := s.cronSched.AddFunc(cfg.CronExpr, func() {
-		s.runScheduledBackup()
+		s.runScheduledBackupContext(parent)
 	})
 	if err != nil {
 		return infraerrors.BadRequest("INVALID_CRON", fmt.Sprintf("failed to schedule: %v", err))
@@ -548,10 +566,17 @@ func (s *BackupService) removeCronSchedule() {
 }
 
 func (s *BackupService) runScheduledBackup() {
+	s.runScheduledBackupContext(s.bgCtx)
+}
+
+func (s *BackupService) runScheduledBackupContext(parent context.Context) {
+	if parent.Err() != nil {
+		return
+	}
 	s.wg.Add(1)
 	defer s.wg.Done()
 
-	ctx, cancel := context.WithTimeout(s.bgCtx, 30*time.Minute)
+	ctx, cancel := context.WithTimeout(parent, 30*time.Minute)
 	defer cancel()
 
 	// 多实例保护: 集群部署时只让 leader 执行定时备份, 避免每个实例各自对同一个

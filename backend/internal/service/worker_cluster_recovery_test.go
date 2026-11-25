@@ -14,8 +14,11 @@ type recoveryStore struct {
 }
 
 func TestSharedTaskGateDoesNotStartGatewayOpsCollector(t *testing.T) {
-	collector := ProvideOpsMetricsCollector(nil, nil, nil, nil, nil, nil, nil, &SharedTaskGate{})
-	require.Nil(t, collector.stopCh)
+	gate := &SharedTaskGate{node: config.EntryNodeConfig{ClusterEnabled: true, Role: config.EntryRoleGatewayOnly}}
+	collector := ProvideOpsMetricsCollector(nil, nil, nil, nil, nil, nil, nil, gate)
+	gate.Begin()
+	require.False(t, gate.Running())
+	require.Nil(t, collector.worker.done)
 	collector.Stop()
 }
 
@@ -72,7 +75,7 @@ func TestWorkerClusterFencedRecovery(t *testing.T) {
 	store := &recoveryStore{snapshot: snapshotFromBootstrap(cfg), members: []EntryMembership{{InstanceID: "dead"}, {InstanceID: "live"}}}
 	coord := &recoveryCoord{entries: []EntryHeartbeat{{InstanceID: "live", Role: "all", AppliedVersion: 1}}}
 	transport := &recoveryRuntime{}
-	s, err := NewWorkerClusterService(store, coord, transport, &config.Config{WorkerPool: cfg, EntryNode: config.EntryNodeConfig{ClusterEnabled: true, ID: "control", Role: "control_only"}}, nil)
+	s, err := NewWorkerClusterService(store, coord, transport, &config.Config{WorkerPool: cfg, EntryNode: config.EntryNodeConfig{ClusterEnabled: true, ID: "control", Role: "control_only"}}, nil, nil)
 	require.NoError(t, err)
 	_, err = s.ForgetOfflineWorker(ctx, "worker", 1)
 	require.ErrorIs(t, err, ErrWorkerClusterConflict)

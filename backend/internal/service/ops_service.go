@@ -33,6 +33,7 @@ const (
 type opsRuntimeSettingsSnapshot struct {
 	monitoringEnabled bool
 	advanced          OpsAdvancedSettings
+	cleanupSchedule   string
 }
 
 type OpsRuntimeSettingsRefreshHealth struct {
@@ -72,8 +73,8 @@ type OpsService struct {
 	// 立即同步到调度热路径读取的内存缓存，避免下次请求才能感知新值。
 	quotaAutoPauseSink func(OpsOpenAIAccountQuotaAutoPauseSettings)
 
-	// Published snapshots are immutable. Gateway reads are lock-free; the mutex
-	// only serializes startup and administrative updates.
+	// Published snapshots are immutable. Gateway reads are lock-free. The mutex
+	// orders updates and refreshes and protects cleanup reloader registration.
 	runtimeSettings   atomic.Pointer[opsRuntimeSettingsSnapshot]
 	runtimeSettingsMu sync.Mutex
 
@@ -97,7 +98,18 @@ func (s *OpsService) SetCleanupReloader(r CleanupReloader) {
 	if s == nil {
 		return
 	}
+	s.runtimeSettingsMu.Lock()
 	s.cleanupReloader = r
+	s.runtimeSettingsMu.Unlock()
+}
+
+func (s *OpsService) getCleanupReloader() CleanupReloader {
+	if s == nil {
+		return nil
+	}
+	s.runtimeSettingsMu.Lock()
+	defer s.runtimeSettingsMu.Unlock()
+	return s.cleanupReloader
 }
 
 // SetOpenAIQuotaAutoPauseSettingsSink 由 wire 注入，把最新的 quota auto-pause 全局默认
@@ -178,8 +190,22 @@ func (s *OpsService) initRuntimeSettings(ctx context.Context) {
 		return
 	}
 	defaults := defaultOpsAdvancedSettingsForConfig(s.cfg)
-	s.runtimeSettings.Store(&opsRuntimeSettingsSnapshot{monitoringEnabled: true, advanced: *defaults})
+	s.runtimeSettings.Store(&opsRuntimeSettingsSnapshot{
+		monitoringEnabled: true, advanced: *defaults, cleanupSchedule: s.effectiveCleanupSchedule(""),
+	})
 	_ = s.RefreshRuntimeSettings(ctx)
+}
+
+func (s *OpsService) effectiveCleanupSchedule(schedule string) string {
+	if schedule = strings.TrimSpace(schedule); schedule != "" {
+		return schedule
+	}
+	if s.cfg != nil {
+		if schedule := strings.TrimSpace(s.cfg.Ops.Cleanup.Schedule); schedule != "" {
+			return schedule
+		}
+	}
+	return opsCleanupDefaultSchedule
 }
 
 // RefreshRuntimeSettings is the cold-path database load used at startup and by
@@ -193,14 +219,13 @@ func (s *OpsService) RefreshRuntimeSettings(ctx context.Context) error {
 		ctx = context.Background()
 	}
 	s.runtimeSettingsMu.Lock()
-	defer s.runtimeSettingsMu.Unlock()
-
 	values, err := s.settingRepo.GetMultiple(ctx, []string{
 		SettingKeyOpsMonitoringEnabled,
 		SettingKeyOpsAdvancedSettings,
 		SettingKeyOpsRuntimeLogConfig,
 	})
 	if err != nil {
+		s.runtimeSettingsMu.Unlock()
 		return err
 	}
 
@@ -209,14 +234,19 @@ func (s *OpsService) RefreshRuntimeSettings(ctx context.Context) error {
 		monitoringEnabled = parseOpsMonitoringEnabled(raw)
 	}
 	advanced := defaultOpsAdvancedSettingsForConfig(s.cfg)
+	schedule := s.effectiveCleanupSchedule("")
 	if raw, ok := values[SettingKeyOpsAdvancedSettings]; ok {
 		if err := json.Unmarshal([]byte(raw), advanced); err != nil {
 			advanced = defaultOpsAdvancedSettingsForConfig(s.cfg)
+		} else {
+			schedule = s.effectiveCleanupSchedule(advanced.DataRetention.CleanupSchedule)
 		}
 	}
 	normalizeOpsAdvancedSettings(advanced)
 
-	s.runtimeSettings.Store(&opsRuntimeSettingsSnapshot{monitoringEnabled: monitoringEnabled, advanced: *advanced})
+	previous := s.runtimeSettings.Swap(&opsRuntimeSettingsSnapshot{
+		monitoringEnabled: monitoringEnabled, advanced: *advanced, cleanupSchedule: schedule,
+	})
 	if s.systemLogSink != nil {
 		persistAccessLogs := false
 		if raw, ok := values[SettingKeyOpsRuntimeLogConfig]; ok {
@@ -228,6 +258,17 @@ func (s *OpsService) RefreshRuntimeSettings(ctx context.Context) error {
 			}
 		}
 		s.systemLogSink.SetPersistAccessLogs(persistAccessLogs)
+	}
+	reloader := s.cleanupReloader
+	s.runtimeSettingsMu.Unlock()
+
+	// Reload joins the old cron job, so call it outside runtimeSettingsMu.
+	// Standby Entries do not have an active cleanup scheduler to reload.
+	if reloader != nil && previous != nil {
+		before, after := previous.advanced.DataRetention, advanced.DataRetention
+		if before.CleanupEnabled != after.CleanupEnabled || previous.cleanupSchedule != schedule {
+			return reloader.Reload(ctx)
+		}
 	}
 	return nil
 }
@@ -373,9 +414,12 @@ func (s *OpsService) SetMonitoringEnabled(enabled bool) {
 	}
 	s.runtimeSettingsMu.Lock()
 	current := s.runtimeSettings.Load()
-	next := &opsRuntimeSettingsSnapshot{monitoringEnabled: enabled, advanced: *defaultOpsAdvancedSettingsForConfig(s.cfg)}
+	next := &opsRuntimeSettingsSnapshot{
+		monitoringEnabled: enabled, advanced: *defaultOpsAdvancedSettingsForConfig(s.cfg), cleanupSchedule: s.effectiveCleanupSchedule(""),
+	}
 	if current != nil {
 		next.advanced = current.advanced
+		next.cleanupSchedule = current.cleanupSchedule
 	}
 	s.runtimeSettings.Store(next)
 	s.runtimeSettingsMu.Unlock()
@@ -387,7 +431,9 @@ func (s *OpsService) storeAdvancedSettingsSnapshot(cfg *OpsAdvancedSettings) {
 	}
 	s.runtimeSettingsMu.Lock()
 	current := s.runtimeSettings.Load()
-	next := &opsRuntimeSettingsSnapshot{monitoringEnabled: true, advanced: *cfg}
+	next := &opsRuntimeSettingsSnapshot{
+		monitoringEnabled: true, advanced: *cfg, cleanupSchedule: s.effectiveCleanupSchedule(cfg.DataRetention.CleanupSchedule),
+	}
 	if current != nil {
 		next.monitoringEnabled = current.monitoringEnabled
 	}

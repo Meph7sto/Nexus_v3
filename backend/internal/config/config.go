@@ -2890,7 +2890,7 @@ func (c *Config) Validate() error {
 	if err := c.EntryNode.validate(); err != nil {
 		return err
 	}
-	if err := c.WorkerPool.validate(); err != nil {
+	if err := c.WorkerPool.validate(c.EntryNode.ClusterEnabled); err != nil {
 		return err
 	}
 	if c.Gateway.MinOutputTokens < 16 {

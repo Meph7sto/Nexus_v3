@@ -87,11 +87,7 @@ type AuthCacheInvalidationWorker struct {
 	cache     APIKeyCache
 	local     *APIKeyService
 	workerID  string
-	ctx       context.Context
-	cancel    context.CancelFunc
-	wg        sync.WaitGroup
-	start     sync.Once
-	stop      sync.Once
+	worker    sharedTaskRunner
 	running   atomic.Bool
 	processed atomic.Uint64
 	failures  atomic.Uint64
@@ -99,9 +95,8 @@ type AuthCacheInvalidationWorker struct {
 }
 
 func NewAuthCacheInvalidationWorker(repo AuthCacheInvalidationOutboxRepository, cache APIKeyCache, local ...*APIKeyService) *AuthCacheInvalidationWorker {
-	ctx, cancel := context.WithCancel(context.Background())
 	w := &AuthCacheInvalidationWorker{
-		repo: repo, cache: cache, workerID: uuid.NewString(), ctx: ctx, cancel: cancel,
+		repo: repo, cache: cache, workerID: uuid.NewString(),
 	}
 	if len(local) > 0 {
 		w.local = local[0]
@@ -111,42 +106,28 @@ func NewAuthCacheInvalidationWorker(repo AuthCacheInvalidationOutboxRepository, 
 }
 
 func (w *AuthCacheInvalidationWorker) Start() {
-	if w == nil || w.repo == nil || w.cache == nil {
-		return
+	if w != nil {
+		w.worker.start(context.Background(), w.runShared)
 	}
-	w.start.Do(func() {
-		w.running.Store(true)
-		w.wg.Add(1)
-		go w.run()
-	})
 }
 
 func (w *AuthCacheInvalidationWorker) Stop() {
-	if w == nil {
-		return
+	if w != nil {
+		w.worker.stop()
 	}
-	w.stop.Do(func() {
-		w.cancel()
-		w.wg.Wait()
-		w.running.Store(false)
-	})
 }
 
-func (w *AuthCacheInvalidationWorker) run() {
-	defer w.wg.Done()
+func (w *AuthCacheInvalidationWorker) runShared(ctx context.Context) {
+	if w.repo == nil || w.cache == nil {
+		return
+	}
+	w.running.Store(true)
 	defer w.running.Store(false)
-	ticker := time.NewTicker(authInvalidationPollInterval)
-	defer ticker.Stop()
-	for {
-		if err := w.processBatch(w.ctx); err != nil && w.ctx.Err() == nil {
+	runSharedPeriodic(ctx, authInvalidationPollInterval, true, func(ctx context.Context) {
+		if err := w.processBatch(ctx); err != nil && ctx.Err() == nil {
 			w.recordFailure(err)
 		}
-		select {
-		case <-w.ctx.Done():
-			return
-		case <-ticker.C:
-		}
-	}
+	})
 }
 
 func (w *AuthCacheInvalidationWorker) processBatch(ctx context.Context) error {
@@ -288,6 +269,6 @@ func (w *AuthCacheInvalidationWorker) Health(ctx context.Context) AuthCacheInval
 
 func ProvideAuthCacheInvalidationWorker(repo AuthCacheInvalidationOutboxRepository, cache APIKeyCache, apiKeyService *APIKeyService, tasks *SharedTaskGate) *AuthCacheInvalidationWorker {
 	worker := NewAuthCacheInvalidationWorker(repo, cache, apiKeyService)
-	tasks.Start(worker.Start)
+	tasks.registerWorker(&worker.worker, worker.runShared)
 	return worker
 }

@@ -287,28 +287,19 @@ func (s *MonthlyLedgerService) IncomeOverview(ctx context.Context, month string)
 	return &result, nil
 }
 func (s *MonthlyLedgerService) StartIncomeSchedules() {
-	ctx, cancel := context.WithCancel(context.Background())
-	s.incomeCancel = cancel
-	s.incomeDone = make(chan struct{})
-	go func() {
-		defer close(s.incomeDone)
-		ticker := time.NewTicker(5 * time.Minute)
-		defer ticker.Stop()
-		for {
-			run, done := context.WithTimeout(ctx, 4*time.Minute)
-			r, e := s.incomeRepo()
-			if e == nil {
-				e = r.ProcessIncomeSchedules(run, s.now().In(s.location))
-			}
-			done()
-			if e != nil && ctx.Err() == nil {
-				slog.Error("income schedule processing failed", "error", e)
-			}
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-			}
+	s.incomeWorker.start(context.Background(), s.runIncomeSchedules)
+}
+
+func (s *MonthlyLedgerService) runIncomeSchedules(ctx context.Context) {
+	runSharedPeriodic(ctx, 5*time.Minute, true, func(ctx context.Context) {
+		run, done := context.WithTimeout(ctx, 4*time.Minute)
+		defer done()
+		r, err := s.incomeRepo()
+		if err == nil {
+			err = r.ProcessIncomeSchedules(run, s.now().In(s.location))
 		}
-	}()
+		if err != nil && ctx.Err() == nil {
+			slog.Error("income schedule processing failed", "error", err)
+		}
+	})
 }

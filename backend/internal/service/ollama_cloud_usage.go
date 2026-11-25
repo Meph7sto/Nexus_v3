@@ -443,7 +443,10 @@ func ProvideOllamaCloudUsageService(
 	svc := NewOllamaCloudUsageService(accountRepo, httpUpstream, settingService, encryptor, keyConfigured)
 	svc.lockCache = lockCache
 	svc.db = db
-	svc.start(tasks.Running())
+	svc.start(tasks == nil)
+	if tasks != nil {
+		tasks.Register(svc.runShared)
+	}
 	return svc
 }
 
@@ -467,7 +470,10 @@ func (s *OllamaCloudUsageService) start(runPeriodic bool) {
 	}
 	s.mu.Unlock()
 	if runPeriodic {
-		go s.runLoop()
+		go func() {
+			defer s.wg.Done()
+			s.runShared(s.parentCtx)
+		}()
 	}
 	go s.probeLoop()
 }
@@ -487,21 +493,13 @@ func (s *OllamaCloudUsageService) Stop() {
 	s.wg.Wait()
 }
 
-func (s *OllamaCloudUsageService) runLoop() {
-	defer s.wg.Done()
-	_ = s.RunDue(s.parentCtx)
-	ticker := time.NewTicker(ollamaCloudUsageCycleInterval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-s.parentCtx.Done():
-			return
-		case <-ticker.C:
-			if err := s.RunDue(s.parentCtx); err != nil {
-				logger.LegacyPrintf("service.ollama_cloud_usage", "run_due_failed: err=%v", err)
-			}
+func (s *OllamaCloudUsageService) runShared(ctx context.Context) {
+	_ = s.RunDue(ctx)
+	runSharedPeriodic(ctx, ollamaCloudUsageCycleInterval, false, func(ctx context.Context) {
+		if err := s.RunDue(ctx); err != nil && ctx.Err() == nil {
+			logger.LegacyPrintf("service.ollama_cloud_usage", "run_due_failed: err=%v", err)
 		}
-	}
+	})
 }
 
 func (s *OllamaCloudUsageService) GetSettings(ctx context.Context) (*OllamaCloudUsageSettings, error) {

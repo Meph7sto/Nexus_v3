@@ -108,6 +108,7 @@ func TestProvideCleanup_WithMinimalDependencies_NoPanic(t *testing.T) {
 		nil, // httpUpstream
 		nil, // cluster
 		nil, // sharedTasks
+		&service.SettingService{},
 	)
 
 	require.NotPanics(t, func() {

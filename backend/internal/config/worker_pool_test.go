@@ -58,3 +58,36 @@ worker_pool:
 	require.Equal(t, 18, cfg.Database.MaxOpenConns)
 	require.Equal(t, 8, cfg.Database.MaxIdleConns)
 }
+
+func TestClusterWorkerPoolCanStartWithoutStaticNodes(t *testing.T) {
+	resetViperWithJWTSecret(t)
+	t.Setenv("ENTRY_NODE_CLUSTER_ENABLED", "true")
+	t.Setenv("ENTRY_NODE_ID", "entry")
+	t.Setenv("WORKER_POOL_ENABLED", "true")
+	cfg, err := Load()
+	require.NoError(t, err)
+	require.True(t, cfg.EntryNode.ClusterEnabled)
+	require.True(t, cfg.WorkerPool.Enabled)
+	require.Empty(t, cfg.WorkerPool.Nodes)
+	t.Setenv("ENTRY_NODE_CLUSTER_ENABLED", "false")
+	_, err = Load()
+	require.ErrorContains(t, err, "worker_pool.nodes is required")
+}
+
+func TestPrivateWorkerEndpoint(t *testing.T) {
+	for _, endpoint := range []string{"http://localhost:9000", "http://10.1.2.3", "https://100.127.0.1/", "https://[fd00::1]:9443"} {
+		u, err := WorkerEndpointURL(endpoint, true)
+		require.NoError(t, err, endpoint)
+		ips, err := ResolvePrivateWorkerIPs(t.Context(), u.Hostname())
+		require.NoError(t, err, endpoint)
+		require.NotEmpty(t, ips)
+	}
+	for _, endpoint := range []string{"https://8.8.8.8", "https://[::ffff:8.8.8.8]", "https://169.254.169.254", "https://[fc00::1%25zone]", "http://localhost:0", "https://localhost:", "https://user:pass@localhost", "https://localhost/path", "https://localhost?x=y", "https://localhost/#"} {
+		_, err := WorkerEndpointURL(endpoint, true)
+		require.Error(t, err, endpoint)
+	}
+	_, err := WorkerEndpointURL("http://localhost:9000", false)
+	require.Error(t, err)
+	_, err = ResolvePrivateWorkerIPs(t.Context(), "unconfigured-worker.invalid.")
+	require.Error(t, err)
+}

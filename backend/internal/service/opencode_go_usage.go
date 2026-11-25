@@ -347,12 +347,7 @@ type OpenCodeGoUsageService struct {
 	httpUpstream   HTTPUpstream
 	settingService *SettingService
 
-	parentCtx    context.Context
-	parentCancel context.CancelFunc
-	wg           sync.WaitGroup
-	mu           sync.Mutex
-	started      bool
-	stopped      bool
+	worker       sharedTaskRunner
 	cycleMu      sync.Mutex
 	refreshGroup singleflight.Group
 	refreshSlots chan struct{}
@@ -367,13 +362,10 @@ func NewOpenCodeGoUsageService(
 	httpUpstream HTTPUpstream,
 	settingService *SettingService,
 ) *OpenCodeGoUsageService {
-	ctx, cancel := context.WithCancel(context.Background())
 	return &OpenCodeGoUsageService{
 		accountRepo:    accountRepo,
 		httpUpstream:   httpUpstream,
 		settingService: settingService,
-		parentCtx:      ctx,
-		parentCancel:   cancel,
 		refreshSlots:   make(chan struct{}, opencodeGoUsageConcurrency),
 		now:            time.Now,
 		instanceID:     uuid.NewString(),
@@ -391,55 +383,29 @@ func ProvideOpenCodeGoUsageService(
 	svc := NewOpenCodeGoUsageService(accountRepo, httpUpstream, settingService)
 	svc.lockCache = lockCache
 	svc.db = db
-	tasks.Start(svc.Start)
+	tasks.registerWorker(&svc.worker, svc.runShared)
 	return svc
 }
 
 func (s *OpenCodeGoUsageService) Start() {
-	if s == nil {
-		return
+	if s != nil {
+		s.worker.start(context.Background(), s.runShared)
 	}
-	s.mu.Lock()
-	if s.started || s.stopped {
-		s.mu.Unlock()
-		return
-	}
-	s.started = true
-	s.wg.Add(1)
-	s.mu.Unlock()
-	go s.runLoop()
 }
 
 func (s *OpenCodeGoUsageService) Stop() {
-	if s == nil {
-		return
+	if s != nil {
+		s.worker.stop()
 	}
-	s.mu.Lock()
-	if s.stopped {
-		s.mu.Unlock()
-		return
-	}
-	s.stopped = true
-	s.parentCancel()
-	s.mu.Unlock()
-	s.wg.Wait()
 }
 
-func (s *OpenCodeGoUsageService) runLoop() {
-	defer s.wg.Done()
-	_ = s.RunDue(s.parentCtx)
-	ticker := time.NewTicker(opencodeGoUsageCycleInterval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-s.parentCtx.Done():
-			return
-		case <-ticker.C:
-			if err := s.RunDue(s.parentCtx); err != nil {
-				logger.LegacyPrintf("service.opencode_go_usage", "run_due_failed: err=%v", err)
-			}
+func (s *OpenCodeGoUsageService) runShared(ctx context.Context) {
+	_ = s.RunDue(ctx)
+	runSharedPeriodic(ctx, opencodeGoUsageCycleInterval, false, func(ctx context.Context) {
+		if err := s.RunDue(ctx); err != nil && ctx.Err() == nil {
+			logger.LegacyPrintf("service.opencode_go_usage", "run_due_failed: err=%v", err)
 		}
-	}
+	})
 }
 
 func (s *OpenCodeGoUsageService) GetSettings(ctx context.Context) (*OpenCodeGoUsageSettings, error) {

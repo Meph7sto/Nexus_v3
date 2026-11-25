@@ -138,24 +138,30 @@ func runMainServer(build BuildInfo) {
 		log.Fatalf("Failed to initialize application: %v", err)
 	}
 	defer app.Cleanup()
-	if app.Cluster != nil {
-		app.Process.bind(app.Server)
-		if err := app.Cluster.Start(context.Background()); err != nil {
-			log.Printf("Worker cluster started in degraded state: %v", err)
-		}
-	}
 	if app.PluginManager != nil {
 		if err := app.PluginManager.Start(context.Background()); err != nil {
 			log.Printf("Plugin manager started in degraded state: %v", err)
 		}
 	}
 	if app.PromptAudit != nil {
-		if err := app.PromptAudit.StartWithWorker(context.Background(), app.Process.tasks.Running()); err != nil {
+		if err := app.PromptAudit.StartWithWorker(context.Background(), false); err != nil {
 			// Startup continues so unrelated APIs stay up. Fail-closed (unavailable)
 			// applies only when a persisted blocking policy was observed; without
 			// blocking intent, Prompt Audit stays ModeOff so the gateway remains
 			// usable and administrators can still disable the feature (#4560).
 			log.Printf("Prompt Audit started in degraded state: %v", err)
+		}
+		app.Process.tasks.Register(func(ctx context.Context) {
+			if err := app.PromptAudit.RunSharedWorker(ctx); err != nil {
+				log.Printf("Prompt Audit worker started in degraded state: %v", err)
+			}
+		})
+	}
+	app.Process.tasks.Begin()
+	if app.Cluster != nil {
+		app.Process.bind(app.Server)
+		if err := app.Cluster.Start(context.Background()); err != nil {
+			log.Printf("Worker cluster started in degraded state: %v", err)
 		}
 	}
 

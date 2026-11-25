@@ -32,12 +32,11 @@
             <button type="button" class="btn btn-secondary" :disabled="busy" @click="openPolicy">
               <Icon name="cog" size="sm" /> {{ label('policy') }}
             </button>
-            <button type="button" class="btn btn-primary" :disabled="busy || !unusedBindings.length" @click="openWorker()">
+            <button type="button" class="btn btn-primary" :disabled="busy" @click="openWorker()">
               <Icon name="plus" size="sm" /> {{ label('addWorker') }}
             </button>
           </div>
         </div>
-        <p v-if="!unusedBindings.length" class="text-sm text-gray-500">{{ label('noBindings') }}</p>
         <p v-if="!workers.length" class="cluster-empty">{{ label('noWorkers') }}</p>
         <div v-else class="overflow-x-auto">
           <table class="cluster-table min-w-[710px]">
@@ -189,29 +188,74 @@
         </div>
       </section>
 
-      <BaseDialog :show="!!workerDraft" :title="label(editingWorker ? 'editWorker' : 'addWorker')" @close="workerDraft = null">
-        <form v-if="workerDraft" class="grid gap-4 sm:grid-cols-2" @submit.prevent="saveWorker">
-          <label v-if="!editingWorker" class="cluster-field sm:col-span-2">{{ label('binding') }}
-            <select v-model="workerDraft.secret_ref" class="input" required>
-              <option value="" disabled>{{ label('pickBinding') }}</option>
-              <option v-for="binding in unusedBindings" :key="binding.ref" :value="binding.ref">
-                {{ binding.node_id }} · {{ binding.url }}
-              </option>
-            </select>
-          </label>
-          <label class="cluster-field sm:col-span-2">{{ label('name') }}
-            <input v-model.trim="workerDraft.name" class="input" maxlength="120" required />
-          </label>
-          <label class="cluster-field">{{ label('weight') }}<input v-model.number="workerDraft.weight" class="input"
-            type="number" min="1" required /></label>
-          <label class="cluster-field">{{ label('capacity') }}<input v-model.number="workerDraft.max_inflight" class="input"
-            type="number" min="0" max="65535" required /></label>
-          <label class="cluster-field sm:col-span-2">{{ label('tags') }}<input v-model="tagsInput" class="input" /></label>
-          <label class="cluster-field sm:col-span-2">{{ label('note') }}<textarea v-model.trim="workerDraft.note"
-            class="input" rows="2" maxlength="512" /></label>
-          <label class="flex items-center gap-2 text-sm"><input v-model="workerDraft.enabled" type="checkbox" />
-            {{ label('enabled') }}</label>
-          <button type="submit" class="btn btn-primary justify-self-end" :disabled="busy">{{ label('publish') }}</button>
+      <BaseDialog :show="!!workerDraft" :title="label(editingWorker ? 'editWorker' : 'addWorker')"
+        :close-on-escape="!busy" :show-close-button="!busy" @close="closeWorker">
+        <form v-if="workerDraft" @submit.prevent="saveWorker">
+          <fieldset class="grid min-w-0 gap-4 sm:grid-cols-2" :disabled="busy">
+            <label v-if="!editingWorker && unusedBindings.length" class="cluster-field sm:col-span-2">{{ label('credentialSource') }}
+              <select v-model="workerDraft.secret_ref" class="input" name="secret_ref" @change="applyWorkerBinding">
+                <option value="">{{ label('managedWorker') }}</option>
+                <optgroup :label="label('binding')">
+                  <option v-for="binding in unusedBindings" :key="binding.ref" :value="binding.ref">
+                    {{ binding.node_id }} · {{ binding.url }}
+                  </option>
+                </optgroup>
+              </select>
+            </label>
+            <label class="cluster-field">{{ label('nodeID') }}
+              <input v-model.trim="workerDraft.node_id" class="input font-mono" name="node_id" maxlength="64"
+                pattern="[A-Za-z0-9._\-]{1,64}" :readonly="editingWorker || !!workerDraft.secret_ref" required />
+            </label>
+            <label class="cluster-field">{{ label('name') }}
+              <input v-model.trim="workerDraft.name" class="input" name="name" maxlength="120" required />
+            </label>
+            <label class="cluster-field">{{ label('transport') }}
+              <select v-model="workerDraft.use_h2c" class="input" name="use_h2c" :disabled="!!workerDraft.secret_ref"
+                @change="workerError = ''">
+                <option :value="false">{{ label('mtls') }}</option>
+                <option :value="true">{{ label('h2c') }}</option>
+              </select>
+            </label>
+            <label class="cluster-field">{{ label('address') }}
+              <input v-model.trim="workerDraft.url" class="input font-mono" name="url" type="url" maxlength="350"
+                :placeholder="workerDraft.use_h2c ? 'http://10.0.0.8:9090' : 'https://worker.internal:9090'"
+                :readonly="!!workerDraft.secret_ref" :aria-describedby="!workerDraft.secret_ref ? 'worker-endpoint-hint' : undefined"
+                required @input="workerError = ''" />
+            </label>
+            <p v-if="!workerDraft.secret_ref" id="worker-endpoint-hint" class="-mt-2 text-xs text-gray-500 sm:col-span-2">
+              {{ label(workerDraft.use_h2c ? 'h2cHint' : 'mtlsHint') }} {{ label('workerDNSHint') }}
+            </p>
+            <div v-if="editingWorker || !workerDraft.secret_ref" class="min-w-0 space-y-1.5 sm:col-span-2">
+              <label class="cluster-field" for="worker-shared-token">{{ label('sharedToken') }}</label>
+              <div class="flex flex-wrap gap-2">
+                <input id="worker-shared-token" v-model="sharedToken" class="input min-w-[8rem] flex-1 font-mono"
+                  name="shared_token" type="password" autocomplete="new-password" spellcheck="false"
+                  aria-describedby="worker-token-hint worker-token-file" :required="!editingWorker" @input="workerError = ''" />
+                <button type="button" class="btn btn-secondary" @click="generateToken">
+                  <Icon name="key" size="sm" /> {{ label('generateToken') }}
+                </button>
+                <button type="button" class="btn btn-secondary" :disabled="!sharedToken"
+                  :aria-label="label('copyToken')" :title="label('copyToken')" @click="copyToClipboard(sharedToken)">
+                  <Icon name="copy" size="sm" />
+                </button>
+              </div>
+              <p id="worker-token-hint" class="text-xs text-gray-500">{{ label(workerTokenHint) }}</p>
+              <p id="worker-token-file" class="break-words text-xs text-gray-500">{{ label('tokenFile', { path: workerTokenFile }) }}</p>
+            </div>
+            <label class="cluster-field">{{ label('weight') }}<input v-model.number="workerDraft.weight" class="input"
+              name="weight" type="number" min="1" max="10000" required /></label>
+            <label class="cluster-field">{{ label('capacity') }}<input v-model.number="workerDraft.max_inflight" class="input"
+              name="max_inflight" type="number" min="0" max="65535" required /></label>
+            <label class="cluster-field sm:col-span-2">{{ label('tags') }}<input v-model="tagsInput" class="input" name="tags" /></label>
+            <label class="cluster-field sm:col-span-2">{{ label('note') }}<textarea v-model.trim="workerDraft.note"
+              class="input" name="note" rows="2" maxlength="1000" /></label>
+            <p v-if="workerError" class="text-sm text-rose-700 sm:col-span-2" role="alert">{{ label(workerError) }}</p>
+            <div class="flex flex-wrap items-center justify-between gap-3 sm:col-span-2">
+              <label class="flex items-center gap-2 text-sm"><input v-model="workerDraft.enabled" type="checkbox" name="enabled" />
+                {{ label('enabled') }}</label>
+              <button type="submit" class="btn btn-primary">{{ label('publish') }}</button>
+            </div>
+          </fieldset>
         </form>
       </BaseDialog>
 
@@ -271,7 +315,8 @@
 
       <BaseDialog :show="template !== null" :title="label('join')" @close="template = null">
         <p class="mb-2 text-sm">{{ label('joinRoutes') }}</p>
-        <pre class="max-w-full whitespace-pre-wrap break-words rounded-md bg-gray-100 p-3 text-xs">{{ template }}</pre>
+        <p v-if="template?.managed" class="mb-2 break-words text-sm">{{ label('joinTokenFile', { path: workerTokenFile }) }}</p>
+        <pre class="max-w-full whitespace-pre-wrap break-words rounded-md bg-gray-100 p-3 text-xs">{{ template?.text }}</pre>
       </BaseDialog>
       <TotpStepUpDialog :controller="stepUp" />
     </div>
@@ -287,18 +332,20 @@ import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
 import StatusBadge from '@/components/common/StatusBadge.vue'
 import TotpStepUpDialog from '@/components/auth/TotpStepUpDialog.vue'
 import Icon from '@/components/icons/Icon.vue'
+import { useClipboard } from '@/composables/useClipboard'
 import { useStepUp, isStepUpCancelled } from '@/composables/useStepUp'
 import { useAppStore } from '@/stores/app'
 import {
   clusterAPI, type ClusterSnapshot, type ClusterView, type DataPreflight, type DataRequest,
   type DataSummary, type EntryHeartbeat, type WorkerConfig, type WorkerDrainStatus, type WorkerNode,
-  type WorkerPoolPolicy, type WorkerProbe,
+  type WorkerPoolPolicy, type WorkerProbe, type WorkerSaveInput,
 } from '@/api/admin/cluster'
 
 const { t, locale } = useI18n()
 const label = (key: string, params: Record<string, string> = {}) => t(`admin.cluster.${key}`, params)
 const app = useAppStore()
 const stepUp = useStepUp()
+const { copyToClipboard } = useClipboard()
 const tabs = [{ key: 'workers', icon: 'server' }, { key: 'entries', icon: 'grid' }, { key: 'data', icon: 'database' }] as const
 const tab = ref<(typeof tabs)[number]['key']>('workers')
 const view = ref<ClusterView | null>(null)
@@ -319,6 +366,13 @@ const metrics = computed(() => [
 const workerDraft = ref<WorkerConfig | null>(null)
 const editingWorker = ref(false)
 const tagsInput = ref('')
+const sharedToken = ref('')
+const workerError = ref('')
+const workerTokenFile = 'WORKER_SECRETS_DIR/shared-token'
+const workerTokenHint = computed(() => {
+  if (!editingWorker.value) return 'tokenHint'
+  return workerDraft.value?.secret_ref ? 'editBoundTokenHint' : 'editTokenHint'
+})
 const workerVersion = ref(0)
 const policyDraft = ref<WorkerPoolPolicy | null>(null)
 const policyVersion = ref(0)
@@ -326,7 +380,7 @@ const strategies = ['least_inflight_affinity', 'least_inflight', 'round_robin']
 const policyNumbers = ['health_interval_seconds', 'health_timeout_seconds', 'circuit_failure_threshold', 'circuit_open_seconds', 'max_attempts'] as const
 const confirmAction = ref<{ kind: 'drain' | 'remove'; node: WorkerNode; version: number } | null>(null)
 const probe = ref<WorkerProbe | null>(null)
-const template = ref<string | null>(null)
+const template = ref<{ text: string; managed: boolean } | null>(null)
 const drainID = ref('')
 const drainStatus = ref<WorkerDrainStatus | null>(null)
 const drainComplete = computed(() => drainStatus.value?.complete && drainStatus.value.health?.status === 'draining' &&
@@ -388,12 +442,24 @@ function publish(snapshot: ClusterSnapshot) {
   void refresh()
 }
 
+function isManagedWorker(node: WorkerNode) {
+  return node.credential_source ? node.credential_source === 'managed' : !node.secret_ref
+}
+
+function closeWorker() {
+  sharedToken.value = ''
+  workerError.value = ''
+  workerDraft.value = null
+}
+
 function openWorker(node?: WorkerNode) {
-  if (!view.value) return
+  if (!view.value || busy.value) return
+  closeWorker()
   editingWorker.value = !!node
   workerVersion.value = view.value.desired.version
   workerDraft.value = node ? {
-    node_id: node.node_id, name: node.name, url: node.url, use_h2c: node.use_h2c, secret_ref: node.secret_ref,
+    node_id: node.node_id, name: node.name, url: node.url, use_h2c: node.use_h2c,
+    secret_ref: isManagedWorker(node) ? '' : node.secret_ref,
     weight: node.weight, max_inflight: node.max_inflight, tags: node.tags, note: node.note, enabled: node.enabled,
   } : {
     node_id: '', name: '', url: '', use_h2c: false, secret_ref: '',
@@ -402,19 +468,51 @@ function openWorker(node?: WorkerNode) {
   tagsInput.value = node?.tags?.join(', ') || ''
 }
 
-function saveWorker() {
+function applyWorkerBinding() {
   if (!workerDraft.value) return
-  const node = { ...workerDraft.value, tags: tagsInput.value.split(',').map((tag) => tag.trim()).filter(Boolean) }
-  if (!editingWorker.value) {
-    const binding = unusedBindings.value.find((b) => b.ref === node.secret_ref)
-    if (!binding) return
-    node.node_id = binding.node_id
-    node.url = binding.url
-    node.use_h2c = binding.url.startsWith('http://')
+  sharedToken.value = ''
+  workerError.value = ''
+  const binding = unusedBindings.value.find((item) => item.ref === workerDraft.value?.secret_ref)
+  if (!binding) return
+  workerDraft.value.node_id = binding.node_id
+  workerDraft.value.url = binding.url
+  workerDraft.value.use_h2c = binding.url.startsWith('http://')
+}
+
+function generateToken() {
+  try {
+    const bytes = globalThis.crypto.getRandomValues(new Uint8Array(24))
+    sharedToken.value = Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('')
+    workerError.value = ''
+  } catch {
+    workerError.value = 'tokenGenerationFailed'
+  }
+}
+
+function saveWorker() {
+  if (!workerDraft.value || busy.value) return
+  workerError.value = ''
+  const existing = editingWorker.value
+  const version = workerVersion.value
+  const { secret_ref, ...fields } = workerDraft.value
+  const node: WorkerSaveInput = { ...fields, tags: tagsInput.value.split(',').map((tag) => tag.trim()).filter(Boolean) }
+  const token = sharedToken.value
+  if (secret_ref && (!existing || !token)) {
+    node.secret_ref = secret_ref
+  } else {
+    if (!node.url.startsWith(node.use_h2c ? 'http://' : 'https://')) {
+      workerError.value = node.use_h2c ? 'h2cEndpointError' : 'mtlsEndpointError'
+      return
+    }
+    if ((!existing || token) && (token.length < 32 || /[^\x21-\x2b\x2d-\x7e]/.test(token))) {
+      workerError.value = 'invalidToken'
+      return
+    }
+    if (token) node.shared_token = token
   }
   void runAction(async () => {
-    const result = await stepUp.run(() => clusterAPI.saveWorker(node, workerVersion.value, editingWorker.value))
-    workerDraft.value = null
+    const result = await stepUp.run(() => clusterAPI.saveWorker(node, version, existing))
+    closeWorker()
     publish(result)
   })
 }
@@ -463,7 +561,10 @@ function probeWorker(node: WorkerNode) {
 }
 
 function showJoin(node: WorkerNode) {
-  void runAction(async () => { template.value = (await stepUp.run(() => clusterAPI.join(node.node_id))).template })
+  void runAction(async () => {
+    const result = await stepUp.run(() => clusterAPI.join(node.node_id))
+    template.value = { text: result.template, managed: isManagedWorker(node) }
+  })
 }
 
 function closeDrain() {
@@ -523,6 +624,7 @@ onMounted(() => {
   refreshTimer = setInterval(refresh, 10_000)
 })
 onUnmounted(() => {
+  closeWorker()
   closeDrain()
   if (refreshTimer !== undefined) clearInterval(refreshTimer)
 })

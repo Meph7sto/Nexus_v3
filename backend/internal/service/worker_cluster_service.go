@@ -25,17 +25,19 @@ const (
 )
 
 type WorkerClusterService struct {
-	store      WorkerClusterStore
-	coord      WorkerClusterCoordination
-	transport  WorkerClusterRuntime
-	bootstrap  config.WorkerPoolConfig
-	bindings   map[string]config.WorkerBindingConfig
-	status     func() EntryProcessStatus
-	nodeID     string
-	name       string
-	role       string
-	instanceID string
-	pollEvery  time.Duration
+	store         WorkerClusterStore
+	coord         WorkerClusterCoordination
+	transport     WorkerClusterRuntime
+	bootstrap     config.WorkerPoolConfig
+	bindings      map[string]config.WorkerBindingConfig
+	encryptor     SecretEncryptor
+	keyConfigured bool
+	status        func() EntryProcessStatus
+	nodeID        string
+	name          string
+	role          string
+	instanceID    string
+	pollEvery     time.Duration
 
 	lifeMu sync.Mutex
 	stop   context.CancelFunc
@@ -51,7 +53,7 @@ type WorkerClusterService struct {
 	registered     bool
 }
 
-func NewWorkerClusterService(store WorkerClusterStore, coord WorkerClusterCoordination, transport WorkerClusterRuntime, cfg *config.Config, status func() EntryProcessStatus) (*WorkerClusterService, error) {
+func NewWorkerClusterService(store WorkerClusterStore, coord WorkerClusterCoordination, transport WorkerClusterRuntime, cfg *config.Config, status func() EntryProcessStatus, encryptor SecretEncryptor) (*WorkerClusterService, error) {
 	if store == nil || coord == nil || transport == nil || cfg == nil || !cfg.EntryNode.ClusterEnabled {
 		return nil, ErrWorkerClusterUnavailable
 	}
@@ -71,8 +73,9 @@ func NewWorkerClusterService(store WorkerClusterStore, coord WorkerClusterCoordi
 	}
 	s := &WorkerClusterService{
 		store: store, coord: coord, transport: transport, bootstrap: cfg.WorkerPool,
-		bindings: make(map[string]config.WorkerBindingConfig), status: status,
-		nodeID: nodeID, name: name, role: role, instanceID: nodeID + "-" + rand.Text(),
+		bindings: make(map[string]config.WorkerBindingConfig), status: status, encryptor: encryptor,
+		keyConfigured: cfg.Totp.EncryptionKeyConfigured,
+		nodeID:        nodeID, name: name, role: role, instanceID: nodeID + "-" + rand.Text(),
 		pollEvery: workerConfigPoll,
 	}
 	if cfg.Gateway.StreamDataIntervalTimeout > 0 {
@@ -324,7 +327,7 @@ func (s *WorkerClusterService) View(ctx context.Context) (WorkerClusterView, err
 		bindings = append(bindings, WorkerBindingView{Ref: binding.Ref, NodeID: binding.NodeID, URL: binding.URL})
 	}
 	slices.SortFunc(bindings, func(a, b WorkerBindingView) int { return strings.Compare(a.Ref, b.Ref) })
-	return WorkerClusterView{Desired: desired, Entries: entries, Bindings: bindings}, nil
+	return WorkerClusterView{Desired: s.publicSnapshot(desired), Entries: entries, Bindings: bindings}, nil
 }
 
 func (s *WorkerClusterService) mutate(ctx context.Context, expected int64, apply func(*WorkerClusterSnapshot) error) (WorkerClusterSnapshot, error) {
@@ -354,7 +357,22 @@ func (s *WorkerClusterService) mutate(ctx context.Context, expected int64, apply
 		return s.coord.PublishWorkerChange(ctx, next.Version)
 	})
 	s.runBounded(ctx, s.Reconcile)
-	return next, nil
+	return s.publicSnapshot(next), nil
+}
+
+func (s *WorkerClusterService) publicSnapshot(snapshot WorkerClusterSnapshot) WorkerClusterSnapshot {
+	snapshot.Workers = slices.Clone(snapshot.Workers)
+	for i := range snapshot.Workers {
+		node := &snapshot.Workers[i]
+		if node.EncryptedToken != "" {
+			node.HasToken, node.CredentialSource = true, "managed"
+			node.EncryptedToken = ""
+		} else {
+			_, node.HasToken = s.bindings[node.SecretRef]
+			node.CredentialSource = "binding"
+		}
+	}
+	return snapshot
 }
 
 func (s *WorkerClusterService) validateSnapshot(snapshot WorkerClusterSnapshot) error {

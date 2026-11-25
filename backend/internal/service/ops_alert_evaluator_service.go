@@ -40,11 +40,7 @@ type OpsAlertEvaluatorService struct {
 	redisClient *redis.Client
 	cfg         *config.Config
 	instanceID  string
-
-	stopCh    chan struct{}
-	startOnce sync.Once
-	stopOnce  sync.Once
-	wg        sync.WaitGroup
+	worker      sharedTaskRunner
 
 	mu         sync.Mutex
 	ruleStates map[int64]*opsAlertRuleState
@@ -84,57 +80,33 @@ func NewOpsAlertEvaluatorService(
 }
 
 func (s *OpsAlertEvaluatorService) Start() {
-	if s == nil {
-		return
+	if s != nil {
+		s.worker.start(context.Background(), s.runShared)
 	}
-	s.startOnce.Do(func() {
-		if s.stopCh == nil {
-			s.stopCh = make(chan struct{})
-		}
-		s.wg.Add(1)
-		go s.run()
-	})
 }
 
 func (s *OpsAlertEvaluatorService) Stop() {
-	if s == nil {
-		return
-	}
-	s.stopOnce.Do(func() {
-		if s.stopCh != nil {
-			close(s.stopCh)
-		}
-	})
-	s.wg.Wait()
-}
-
-func (s *OpsAlertEvaluatorService) run() {
-	defer s.wg.Done()
-
-	// Start immediately to produce early feedback in ops dashboard.
-	timer := time.NewTimer(0)
-	defer timer.Stop()
-
-	for {
-		select {
-		case <-timer.C:
-			interval := s.getInterval()
-			s.evaluateOnce(interval)
-			timer.Reset(interval)
-		case <-s.stopCh:
-			return
-		}
+	if s != nil {
+		s.worker.stop()
 	}
 }
 
-func (s *OpsAlertEvaluatorService) getInterval() time.Duration {
+func (s *OpsAlertEvaluatorService) runShared(ctx context.Context) {
+	for ctx.Err() == nil {
+		interval := s.getInterval(ctx)
+		s.evaluateOnce(ctx, interval)
+		sleepOrDone(ctx, interval)
+	}
+}
+
+func (s *OpsAlertEvaluatorService) getInterval(parent context.Context) time.Duration {
 	// Default.
 	interval := 60 * time.Second
 
 	if s == nil || s.opsService == nil {
 		return interval
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(parent, 2*time.Second)
 	defer cancel()
 
 	cfg, err := s.opsService.GetOpsAlertRuntimeSettings(ctx)
@@ -153,7 +125,7 @@ func (s *OpsAlertEvaluatorService) getInterval() time.Duration {
 	return time.Duration(cfg.EvaluationIntervalSeconds) * time.Second
 }
 
-func (s *OpsAlertEvaluatorService) evaluateOnce(interval time.Duration) {
+func (s *OpsAlertEvaluatorService) evaluateOnce(parent context.Context, interval time.Duration) {
 	if s == nil || s.opsRepo == nil {
 		return
 	}
@@ -161,7 +133,7 @@ func (s *OpsAlertEvaluatorService) evaluateOnce(interval time.Duration) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), opsAlertEvaluatorTimeout)
+	ctx, cancel := context.WithTimeout(parent, opsAlertEvaluatorTimeout)
 	defer cancel()
 
 	if s.opsService != nil && !s.opsService.IsMonitoringEnabled(ctx) {
@@ -188,7 +160,7 @@ func (s *OpsAlertEvaluatorService) evaluateOnce(interval time.Duration) {
 
 	rules, err := s.opsRepo.ListAlertRules(ctx)
 	if err != nil {
-		s.recordHeartbeatError(runAt, time.Since(startedAt), err)
+		s.recordHeartbeatError(parent, runAt, time.Since(startedAt), err)
 		logger.LegacyPrintf("service.ops_alert_evaluator", "[OpsAlertEvaluator] list rules failed: %v", err)
 		return
 	}
@@ -311,7 +283,7 @@ func (s *OpsAlertEvaluatorService) evaluateOnce(interval time.Duration) {
 	}
 
 	result := truncateString(fmt.Sprintf("rules=%d enabled=%d evaluated=%d created=%d resolved=%d emails_sent=%d", rulesTotal, rulesEnabled, rulesEvaluated, eventsCreated, eventsResolved, emailsSent), 2048)
-	s.recordHeartbeatSuccess(runAt, time.Since(startedAt), result)
+	s.recordHeartbeatSuccess(parent, runAt, time.Since(startedAt), result)
 }
 
 func (s *OpsAlertEvaluatorService) pruneRuleStates(rules []*OpsAlertRule) {
@@ -742,7 +714,7 @@ func (s *OpsAlertEvaluatorService) maybeSendAlertEmail(ctx context.Context, runt
 	}
 
 	if anySent {
-		_ = s.opsRepo.UpdateAlertEventEmailSent(context.Background(), event.ID, true)
+		_ = s.opsRepo.UpdateAlertEventEmailSent(ctx, event.ID, true)
 	}
 	return anySent
 }
@@ -954,13 +926,13 @@ func (s *OpsAlertEvaluatorService) maybeLogSkip(key string) {
 	logger.LegacyPrintf("service.ops_alert_evaluator", "[OpsAlertEvaluator] leader lock held by another instance; skipping (key=%q)", key)
 }
 
-func (s *OpsAlertEvaluatorService) recordHeartbeatSuccess(runAt time.Time, duration time.Duration, result string) {
+func (s *OpsAlertEvaluatorService) recordHeartbeatSuccess(parent context.Context, runAt time.Time, duration time.Duration, result string) {
 	if s == nil || s.opsRepo == nil {
 		return
 	}
 	now := time.Now().UTC()
 	durMs := duration.Milliseconds()
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(parent, 2*time.Second)
 	defer cancel()
 	msg := strings.TrimSpace(result)
 	if msg == "" {
@@ -976,14 +948,14 @@ func (s *OpsAlertEvaluatorService) recordHeartbeatSuccess(runAt time.Time, durat
 	})
 }
 
-func (s *OpsAlertEvaluatorService) recordHeartbeatError(runAt time.Time, duration time.Duration, err error) {
+func (s *OpsAlertEvaluatorService) recordHeartbeatError(parent context.Context, runAt time.Time, duration time.Duration, err error) {
 	if s == nil || s.opsRepo == nil || err == nil {
 		return
 	}
 	now := time.Now().UTC()
 	durMs := duration.Milliseconds()
 	msg := truncateString(err.Error(), 2048)
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(parent, 2*time.Second)
 	defer cancel()
 	_ = s.opsRepo.UpsertJobHeartbeat(ctx, &OpsUpsertJobHeartbeatInput{
 		JobName:        opsAlertEvaluatorJobName,

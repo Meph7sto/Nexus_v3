@@ -148,41 +148,111 @@ func validWorkerNodeText(node WorkerNode) bool {
 }
 
 func (s *WorkerClusterService) resolveWorker(node WorkerNode) (config.WorkerNodeConfig, error) {
-	binding, exists := s.bindings[node.SecretRef]
 	address, valid := canonicalWorkerBindingURL(node.URL)
-	if !exists || !valid || binding.NodeID != node.NodeID || binding.URL != address ||
-		node.UseH2C != strings.HasPrefix(address, "http://") || node.UseH2C && !s.bootstrap.AllowPrivateH2C {
+	if !valid || node.UseH2C != strings.HasPrefix(address, "http://") || node.UseH2C && !s.bootstrap.AllowPrivateH2C {
+		return config.WorkerNodeConfig{}, fmt.Errorf("%w: Worker URL or transport is not allowed", ErrWorkerClusterInvalid)
+	}
+	resolved := config.WorkerNodeConfig{ID: node.NodeID, URL: address, Weight: node.Weight, MaxInFlight: node.MaxInFlight}
+	if node.EncryptedToken != "" {
+		if _, err := config.WorkerEndpointURL(address, s.bootstrap.AllowPrivateH2C); err != nil {
+			return config.WorkerNodeConfig{}, fmt.Errorf("%w: Worker URL or transport is not allowed", ErrWorkerClusterInvalid)
+		}
+		if !s.keyConfigured || s.encryptor == nil {
+			return config.WorkerNodeConfig{}, ErrWorkerClusterUnavailable
+		}
+		token, err := s.encryptor.Decrypt(node.EncryptedToken)
+		if err != nil || !config.ValidWorkerSharedToken(token) {
+			return config.WorkerNodeConfig{}, ErrWorkerClusterUnavailable
+		}
+		resolved.SharedToken = token
+		return resolved, nil
+	}
+	binding, exists := s.bindings[node.SecretRef]
+	if !exists || binding.NodeID != node.NodeID || binding.URL != address {
 		return config.WorkerNodeConfig{}, fmt.Errorf("%w: Worker does not match a provisioned endpoint binding", ErrWorkerClusterInvalid)
 	}
-	return config.WorkerNodeConfig{
-		ID: node.NodeID, URL: address, Weight: node.Weight, MaxInFlight: node.MaxInFlight,
-		SharedToken: binding.SharedToken, SharedTokenFile: binding.SharedTokenFile,
-	}, nil
+	resolved.SharedToken, resolved.SharedTokenFile = binding.SharedToken, binding.SharedTokenFile
+	return resolved, nil
 }
 
-func (s *WorkerClusterService) UpsertWorker(ctx context.Context, node WorkerNode, expectedVersion int64) (WorkerClusterSnapshot, error) {
+func (s *WorkerClusterService) UpsertWorker(ctx context.Context, node WorkerNode, expectedVersion int64, sharedToken string) (WorkerClusterSnapshot, error) {
 	node.NodeID, node.Name, node.SecretRef = strings.TrimSpace(node.NodeID), strings.TrimSpace(node.Name), strings.TrimSpace(node.SecretRef)
 	node.URL, _ = canonicalWorkerBindingURL(node.URL)
 	node.DrainVersion, node.DrainEntries = 0, []string{}
+	node.EncryptedToken, node.HasToken, node.CredentialSource = "", false, ""
 	if node.Tags == nil {
 		node.Tags = []string{}
 	}
 	return s.mutate(ctx, expectedVersion, func(snapshot *WorkerClusterSnapshot) error {
-		for i, existing := range snapshot.Workers {
-			if existing.NodeID == node.NodeID {
-				if existing.DrainVersion != 0 {
-					if node.Enabled || node.URL != existing.URL || node.SecretRef != existing.SecretRef {
-						return fmt.Errorf("%w: cannot change routing for a draining Worker", ErrWorkerClusterConflict)
-					}
-					node.DrainVersion, node.DrainEntries = existing.DrainVersion, existing.DrainEntries
+		index := slices.IndexFunc(snapshot.Workers, func(existing WorkerNode) bool { return existing.NodeID == node.NodeID })
+		var existing WorkerNode
+		if index >= 0 {
+			existing = snapshot.Workers[index]
+			node.EncryptedToken = existing.EncryptedToken
+			if existing.DrainVersion != 0 {
+				keepsLegacy := sharedToken == "" && node.EncryptedToken == ""
+				if node.Enabled || node.URL != existing.URL || (keepsLegacy && node.SecretRef != existing.SecretRef) {
+					return fmt.Errorf("%w: cannot change routing for a draining Worker", ErrWorkerClusterConflict)
 				}
-				snapshot.Workers[i] = node
-				return nil
+				node.DrainVersion, node.DrainEntries = existing.DrainVersion, existing.DrainEntries
 			}
 		}
-		snapshot.Workers = append(snapshot.Workers, node)
+		if sharedToken != "" || node.EncryptedToken != "" {
+			node.SecretRef = ""
+			if err := s.validateManagedWorkerAddress(ctx, node, existing); err != nil {
+				return err
+			}
+		}
+		if sharedToken != "" {
+			if !config.ValidWorkerSharedToken(sharedToken) {
+				return fmt.Errorf("%w: invalid Worker bearer token", ErrWorkerClusterInvalid)
+			}
+			if !s.keyConfigured {
+				return ErrWorkerTokenKeyNotConfigured
+			}
+			if s.encryptor == nil {
+				return ErrWorkerClusterUnavailable
+			}
+			credential, err := s.encryptor.Encrypt(sharedToken)
+			if err != nil || credential == "" {
+				return ErrWorkerClusterUnavailable
+			}
+			node.EncryptedToken = credential
+		}
+		if index < 0 {
+			snapshot.Workers = append(snapshot.Workers, node)
+		} else {
+			snapshot.Workers[index] = node
+		}
 		return nil
 	})
+}
+
+func (s *WorkerClusterService) validateManagedWorkerAddress(ctx context.Context, node, existing WorkerNode) error {
+	address, err := config.WorkerEndpointURL(node.URL, s.bootstrap.AllowPrivateH2C)
+	if err != nil || node.UseH2C != (address.Scheme == "http") {
+		return fmt.Errorf("%w: Worker URL or transport is not allowed", ErrWorkerClusterInvalid)
+	}
+	if !node.Enabled {
+		return nil
+	}
+	if existing.Enabled {
+		previous, err := config.WorkerEndpointURL(existing.URL, s.bootstrap.AllowPrivateH2C)
+		if err == nil && sameWorkerOrigin(previous, address) {
+			return nil
+		}
+	}
+	ctx, cancel := context.WithTimeout(ctx, workerStoreTimeout)
+	defer cancel()
+	if _, err := config.ResolvePrivateWorkerIPs(ctx, address.Hostname()); err != nil {
+		return fmt.Errorf("%w: Worker hostname must resolve only to private addresses", ErrWorkerClusterInvalid)
+	}
+	return nil
+}
+
+func sameWorkerOrigin(a, b *url.URL) bool {
+	return a.Scheme == b.Scheme && strings.EqualFold(a.Hostname(), b.Hostname()) &&
+		strings.TrimLeft(config.WorkerEndpointPort(a), "0") == strings.TrimLeft(config.WorkerEndpointPort(b), "0")
 }
 
 func (s *WorkerClusterService) DeleteWorker(ctx context.Context, nodeID string, expectedVersion int64) (WorkerClusterSnapshot, error) {
@@ -298,6 +368,7 @@ func (s *WorkerClusterService) JoinTemplate(ctx context.Context, nodeID string) 
 		return "", err
 	}
 	return fmt.Sprintf("# Provision WORKER_ENV_FILE, WORKER_SECRETS_DIR and private WORKER_BIND_IP separately. Account routes come from Entry.\n"+
+		"# Put the matching bearer token in WORKER_SECRETS_DIR/shared-token; do not put it in this command.\n"+
 		"WORKER_NODE_ID='%s' docker compose -f deploy/worker/compose.yaml up -d --build worker", node.NodeID), nil
 }
 

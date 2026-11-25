@@ -58,11 +58,15 @@ func ProvideBatchImageWorkerRuntime(
 		StaleAfter: NewBatchImageWorkerOptionsFromConfig(cfg).StaleActiveAfter,
 		Limit:      NewBatchImageWorkerOptionsFromConfig(cfg).RecoverLimit,
 	}
-	tasks.Start(runtime.Start)
+	tasks.RegisterLifecycle(runtime.startContext, runtime.Stop)
 	return runtime
 }
 
 func (r *BatchImageWorkerRuntime) Start() {
+	r.startContext(context.Background())
+}
+
+func (r *BatchImageWorkerRuntime) startContext(parent context.Context) {
 	if r == nil || r.worker == nil || r.cfg == nil || !r.cfg.BatchImage.QueueEnabled {
 		return
 	}
@@ -72,7 +76,7 @@ func (r *BatchImageWorkerRuntime) Start() {
 		return
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(parent)
 	done := make(chan struct{})
 	r.cancel = cancel
 	r.done = done
@@ -120,11 +124,9 @@ func (r *BatchImageWorkerRuntime) Stop() {
 		return
 	}
 	r.mu.Lock()
+	defer r.mu.Unlock()
 	cancel := r.cancel
 	done := r.done
-	r.cancel = nil
-	r.done = nil
-	r.mu.Unlock()
 
 	if cancel != nil {
 		cancel()
@@ -132,6 +134,8 @@ func (r *BatchImageWorkerRuntime) Stop() {
 	if done != nil {
 		<-done
 	}
+	r.cancel = nil
+	r.done = nil
 }
 
 func (r *BatchImageWorkerRuntime) Running() bool {

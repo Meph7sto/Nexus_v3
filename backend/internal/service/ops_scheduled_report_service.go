@@ -43,16 +43,11 @@ type OpsScheduledReportService struct {
 	cfg          *config.Config
 
 	instanceID string
+	worker     sharedTaskRunner
 	loc        *time.Location
 
 	distributedLockOn bool
 	warnNoRedisOnce   sync.Once
-
-	startOnce sync.Once
-	stopOnce  sync.Once
-	stopCtx   context.Context
-	stop      context.CancelFunc
-	wg        sync.WaitGroup
 }
 
 func NewOpsScheduledReportService(
@@ -81,11 +76,6 @@ func NewOpsScheduledReportService(
 		loc:               loc,
 		distributedLockOn: lockOn,
 		warnNoRedisOnce:   sync.Once{},
-		startOnce:         sync.Once{},
-		stopOnce:          sync.Once{},
-		stopCtx:           nil,
-		stop:              nil,
-		wg:                sync.WaitGroup{},
 	}
 }
 
@@ -94,56 +84,28 @@ func (s *OpsScheduledReportService) Start() {
 }
 
 func (s *OpsScheduledReportService) StartWithContext(ctx context.Context) {
-	if s == nil {
-		return
+	if s != nil {
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		s.worker.start(ctx, s.runShared)
 	}
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	if s.cfg != nil && !s.cfg.Ops.Enabled {
-		return
-	}
-	if s.opsService == nil || s.emailService == nil {
-		return
-	}
-
-	s.startOnce.Do(func() {
-		s.stopCtx, s.stop = context.WithCancel(ctx)
-		s.wg.Add(1)
-		go s.run()
-	})
 }
 
 func (s *OpsScheduledReportService) Stop() {
-	if s == nil {
+	if s != nil {
+		s.worker.stop()
+	}
+}
+
+func (s *OpsScheduledReportService) runShared(ctx context.Context) {
+	if (s.cfg != nil && !s.cfg.Ops.Enabled) || s.opsService == nil || s.emailService == nil {
 		return
 	}
-	s.stopOnce.Do(func() {
-		if s.stop != nil {
-			s.stop()
-		}
-	})
-	s.wg.Wait()
+	runSharedPeriodic(ctx, opsScheduledReportTickInterval, true, s.runOnce)
 }
 
-func (s *OpsScheduledReportService) run() {
-	defer s.wg.Done()
-
-	ticker := time.NewTicker(opsScheduledReportTickInterval)
-	defer ticker.Stop()
-
-	s.runOnce()
-	for {
-		select {
-		case <-ticker.C:
-			s.runOnce()
-		case <-s.stopCtx.Done():
-			return
-		}
-	}
-}
-
-func (s *OpsScheduledReportService) runOnce() {
+func (s *OpsScheduledReportService) runOnce(parent context.Context) {
 	if s == nil || s.opsService == nil || s.emailService == nil {
 		return
 	}
@@ -151,7 +113,7 @@ func (s *OpsScheduledReportService) runOnce() {
 	startedAt := time.Now().UTC()
 	runAt := startedAt
 
-	ctx, cancel := context.WithTimeout(s.stopCtx, 60*time.Second)
+	ctx, cancel := context.WithTimeout(parent, 60*time.Second)
 	defer cancel()
 
 	// Respect ops monitoring enabled switch.
@@ -192,14 +154,14 @@ func (s *OpsScheduledReportService) runOnce() {
 
 		attempts, err := s.runReport(ctx, report, now)
 		if err != nil {
-			s.recordHeartbeatError(runAt, time.Since(startedAt), err)
+			s.recordHeartbeatError(parent, runAt, time.Since(startedAt), err)
 			return
 		}
 		sentAttempts += attempts
 	}
 
 	result := truncateString(fmt.Sprintf("reports=%d due=%d send_attempts=%d", reportsTotal, reportsDue, sentAttempts), 2048)
-	s.recordHeartbeatSuccess(runAt, time.Since(startedAt), result)
+	s.recordHeartbeatSuccess(parent, runAt, time.Since(startedAt), result)
 }
 
 type opsScheduledReport struct {
@@ -865,13 +827,13 @@ func (s *OpsScheduledReportService) setLastRunAt(ctx context.Context, reportType
 	_ = s.redisClient.Set(ctx, key, strconv.FormatInt(t.UTC().Unix(), 10), 14*24*time.Hour).Err()
 }
 
-func (s *OpsScheduledReportService) recordHeartbeatSuccess(runAt time.Time, duration time.Duration, result string) {
+func (s *OpsScheduledReportService) recordHeartbeatSuccess(parent context.Context, runAt time.Time, duration time.Duration, result string) {
 	if s == nil || s.opsService == nil || s.opsService.opsRepo == nil {
 		return
 	}
 	now := time.Now().UTC()
 	durMs := duration.Milliseconds()
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(parent, 2*time.Second)
 	defer cancel()
 	msg := strings.TrimSpace(result)
 	if msg == "" {
@@ -887,14 +849,14 @@ func (s *OpsScheduledReportService) recordHeartbeatSuccess(runAt time.Time, dura
 	})
 }
 
-func (s *OpsScheduledReportService) recordHeartbeatError(runAt time.Time, duration time.Duration, err error) {
+func (s *OpsScheduledReportService) recordHeartbeatError(parent context.Context, runAt time.Time, duration time.Duration, err error) {
 	if s == nil || s.opsService == nil || s.opsService.opsRepo == nil || err == nil {
 		return
 	}
 	now := time.Now().UTC()
 	durMs := duration.Milliseconds()
 	msg := truncateString(err.Error(), 2048)
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(parent, 2*time.Second)
 	defer cancel()
 	_ = s.opsService.opsRepo.UpsertJobHeartbeat(ctx, &OpsUpsertJobHeartbeatInput{
 		JobName:        opsScheduledReportJobName,

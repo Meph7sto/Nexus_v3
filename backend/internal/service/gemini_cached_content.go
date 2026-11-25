@@ -16,7 +16,6 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -640,47 +639,39 @@ type GeminiCachedContentService struct {
 	cfg    *config.Config
 	now    func() time.Time
 
-	startOnce sync.Once
-	stopOnce  sync.Once
-	stopCh    chan struct{}
+	worker sharedTaskRunner
 }
 
 func NewGeminiCachedContentService(repo GeminiCachedContentRepository, compat *GeminiMessagesCompatService, cfg *config.Config) *GeminiCachedContentService {
-	return &GeminiCachedContentService{repo: repo, compat: compat, cfg: cfg, now: time.Now, stopCh: make(chan struct{})}
+	return &GeminiCachedContentService{repo: repo, compat: compat, cfg: cfg, now: time.Now}
 }
 
 // Start 启动后台回滚恢复：定期处理租约已过期仍未清除的修改意图。
 func (s *GeminiCachedContentService) Start() {
-	if s == nil || s.repo == nil {
-		return
+	if s != nil {
+		s.worker.start(context.Background(), s.runMutationRecovery)
 	}
-	s.startOnce.Do(func() { go s.runMutationRecovery() })
 }
 
 // Stop 停止后台回滚恢复。
 func (s *GeminiCachedContentService) Stop() {
-	if s == nil {
-		return
+	if s != nil {
+		s.worker.stop()
 	}
-	s.stopOnce.Do(func() { close(s.stopCh) })
 }
 
-func (s *GeminiCachedContentService) runMutationRecovery() {
-	ticker := time.NewTicker(geminiCachedContentMutationRecoveryInterval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-s.stopCh:
-			return
-		case <-ticker.C:
-			recovered, err := s.RecoverStaleMutations(context.Background())
-			if err != nil {
-				logger.LegacyPrintf("service.gemini_cached_content", "Warning: gemini cached content mutation recovery failed (recovered=%d): %v", recovered, err)
-			} else if recovered > 0 {
-				logger.LegacyPrintf("service.gemini_cached_content", "gemini cached content mutation recovery rolled back %d stale mutations", recovered)
-			}
-		}
+func (s *GeminiCachedContentService) runMutationRecovery(ctx context.Context) {
+	if s.repo == nil {
+		return
 	}
+	runSharedPeriodic(ctx, geminiCachedContentMutationRecoveryInterval, false, func(ctx context.Context) {
+		recovered, err := s.RecoverStaleMutations(ctx)
+		if err != nil && ctx.Err() == nil {
+			logger.LegacyPrintf("service.gemini_cached_content", "Warning: gemini cached content mutation recovery failed (recovered=%d): %v", recovered, err)
+		} else if recovered > 0 {
+			logger.LegacyPrintf("service.gemini_cached_content", "gemini cached content mutation recovery rolled back %d stale mutations", recovered)
+		}
+	})
 }
 
 // Now 返回服务时钟。
@@ -814,8 +805,8 @@ func (s *GeminiCachedContentService) RecoverStaleMutations(ctx context.Context) 
 	var errs []error
 	for _, id := range ids {
 		select {
-		case <-s.stopCh:
-			return recovered, errors.Join(errs...)
+		case <-ctx.Done():
+			return recovered, errors.Join(append(errs, ctx.Err())...)
 		default:
 		}
 		itemCtx, cancel := context.WithTimeout(ctx, geminiCachedContentMutationRecoveryTimeout)

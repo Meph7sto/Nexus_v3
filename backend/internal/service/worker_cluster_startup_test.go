@@ -83,7 +83,7 @@ func TestWorkerClusterStartupRecoversByPollAfterPGUnavailable(t *testing.T) {
 	store.unavailable.Store(true)
 	runtime := &clusterStartupRuntime{store: store}
 	cfg := &config.Config{EntryNode: config.EntryNodeConfig{ClusterEnabled: true, ID: "entry-a", Role: config.EntryRoleAll}}
-	control, err := NewWorkerClusterService(store, clusterStartupCoordination{}, runtime, cfg, nil)
+	control, err := NewWorkerClusterService(store, clusterStartupCoordination{}, runtime, cfg, nil, nil)
 	require.NoError(t, err)
 	control.pollEvery = 5 * time.Millisecond
 	require.Error(t, control.Start(t.Context()))

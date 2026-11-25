@@ -78,7 +78,7 @@ func (s *workerNodeStore) Load(ctx context.Context) (service.WorkerClusterSnapsh
 	}
 	rows, err := tx.QueryContext(ctx, `
 		SELECT node_id, name, url, use_h2c, weight, max_inflight, tags, note,
-		       enabled, secret_ref, drain_version, drain_entries
+		       enabled, secret_ref, drain_version, drain_entries, encrypted_token
 		FROM worker_nodes ORDER BY node_id`)
 	if err != nil {
 		return service.WorkerClusterSnapshot{}, err
@@ -89,7 +89,7 @@ func (s *workerNodeStore) Load(ctx context.Context) (service.WorkerClusterSnapsh
 		var node service.WorkerNode
 		var tags, entries []byte
 		if err := rows.Scan(&node.NodeID, &node.Name, &node.URL, &node.UseH2C, &node.Weight, &node.MaxInFlight,
-			&tags, &node.Note, &node.Enabled, &node.SecretRef, &node.DrainVersion, &entries); err != nil {
+			&tags, &node.Note, &node.Enabled, &node.SecretRef, &node.DrainVersion, &entries, &node.EncryptedToken); err != nil {
 			return service.WorkerClusterSnapshot{}, err
 		}
 		if json.Unmarshal(tags, &node.Tags) != nil || json.Unmarshal(entries, &node.DrainEntries) != nil {
@@ -156,14 +156,15 @@ func (s *workerNodeStore) Save(ctx context.Context, expected int64, draft servic
 			return err
 		}
 		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO worker_nodes (node_id,name,url,use_h2c,weight,max_inflight,tags,note,enabled,secret_ref,drain_version,drain_entries)
-			VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,$10,$11,$12::jsonb)
+			INSERT INTO worker_nodes (node_id,name,url,use_h2c,weight,max_inflight,tags,note,enabled,secret_ref,drain_version,drain_entries,encrypted_token)
+			VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,$10,$11,$12::jsonb,$13)
 			ON CONFLICT (node_id) DO UPDATE SET
 				name=EXCLUDED.name,url=EXCLUDED.url,use_h2c=EXCLUDED.use_h2c,weight=EXCLUDED.weight,
 				max_inflight=EXCLUDED.max_inflight,tags=EXCLUDED.tags,note=EXCLUDED.note,enabled=EXCLUDED.enabled,
-				secret_ref=EXCLUDED.secret_ref,drain_version=EXCLUDED.drain_version,drain_entries=EXCLUDED.drain_entries,updated_at=NOW()`,
+				secret_ref=EXCLUDED.secret_ref,drain_version=EXCLUDED.drain_version,drain_entries=EXCLUDED.drain_entries,
+				encrypted_token=EXCLUDED.encrypted_token,updated_at=NOW()`,
 			node.NodeID, node.Name, node.URL, node.UseH2C, node.Weight, node.MaxInFlight,
-			string(tags), node.Note, node.Enabled, node.SecretRef, node.DrainVersion, string(entries)); err != nil {
+			string(tags), node.Note, node.Enabled, node.SecretRef, node.DrainVersion, string(entries), node.EncryptedToken); err != nil {
 			return err
 		}
 	}

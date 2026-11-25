@@ -54,8 +54,8 @@ func (s *PromptService) Start(ctx context.Context) error {
 	return s.StartWithWorker(ctx, true)
 }
 
-// StartWithWorker refreshes local policy on every Entry. The designated
-// Entry can additionally consume the shared deferred-audit queue.
+// StartWithWorker refreshes local policy on every Entry. Bootstrap starts the
+// shared consumer separately for the lifetime of an Entry task lease.
 func (s *PromptService) StartWithWorker(ctx context.Context, runWorker bool) error {
 	if s == nil || s.config == nil || s.runner == nil {
 		return errors.New("prompt audit service unavailable")
@@ -73,6 +73,17 @@ func (s *PromptService) StartWithWorker(ctx context.Context, runWorker bool) err
 		return errors.Join(configErr, s.runner.Start(background))
 	}
 	return configErr
+}
+
+func (s *PromptService) RunSharedWorker(ctx context.Context) error {
+	if s == nil || s.runner == nil {
+		return errors.New("prompt audit worker unavailable")
+	}
+	if err := s.runner.Start(ctx); err != nil {
+		return err
+	}
+	<-ctx.Done()
+	return s.runner.Shutdown(context.Background())
 }
 
 func (s *PromptService) Shutdown(ctx context.Context) error {

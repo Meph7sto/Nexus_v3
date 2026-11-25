@@ -46,12 +46,10 @@ type ChannelMonitorV2Aggregator struct {
 	db         *sql.DB
 	settings   channelMonitorRuntimeReader
 	instanceID string
-	stopCh     chan struct{}
 	// kickCh wakes the loop early after a settings change (buffered 1).
-	kickCh    chan struct{}
-	startOnce sync.Once
-	stopOnce  sync.Once
-	mu        sync.Mutex
+	kickCh chan struct{}
+	worker sharedTaskRunner
+	mu     sync.Mutex
 	// backfillAt is the earliest minute already recomputed (mirrors DB cursor).
 	// Zero means "not yet loaded from durable watermark this process".
 	backfillAt       time.Time
@@ -63,9 +61,6 @@ type ChannelMonitorV2Aggregator struct {
 	cursorLoaded bool
 	// hasAggregated is true once any recompute in this process (or durable data) exists.
 	hasAggregated bool
-	unsub         func()
-	ctx           context.Context
-	cancel        context.CancelFunc
 }
 
 func NewChannelMonitorV2Aggregator(repo ChannelMonitorV2Repository, db *sql.DB, settings channelMonitorRuntimeReader) *ChannelMonitorV2Aggregator {
@@ -74,64 +69,21 @@ func NewChannelMonitorV2Aggregator(repo ChannelMonitorV2Repository, db *sql.DB, 
 		db:            db,
 		settings:      settings,
 		instanceID:    uuid.NewString(),
-		stopCh:        make(chan struct{}),
 		kickCh:        make(chan struct{}, 1),
 		backfillChunk: channelMonitorV2BackfillChunkInit,
 	}
 }
 
 func (s *ChannelMonitorV2Aggregator) Start() {
-	if s == nil || s.repo == nil {
-		return
+	if s != nil {
+		s.worker.start(context.Background(), s.runShared)
 	}
-	s.startOnce.Do(func() {
-		s.mu.Lock()
-		s.ctx, s.cancel = context.WithCancel(context.Background())
-		s.mu.Unlock()
-		if sub, ok := s.settings.(channelMonitorRuntimeSubscriber); ok && sub != nil {
-			unsub := sub.SubscribeChannelMonitorRuntime(func() {
-				s.kick()
-			})
-			s.mu.Lock()
-			stopped := s.ctx == nil
-			if !stopped {
-				select {
-				case <-s.ctx.Done():
-					stopped = true
-				default:
-				}
-			}
-			if !stopped {
-				s.unsub = unsub
-			}
-			s.mu.Unlock()
-			if stopped && unsub != nil {
-				unsub()
-			}
-		}
-		go s.loop()
-	})
 }
 
 func (s *ChannelMonitorV2Aggregator) Stop() {
-	if s == nil {
-		return
+	if s != nil {
+		s.worker.stop()
 	}
-	s.stopOnce.Do(func() {
-		s.mu.Lock()
-		cancel := s.cancel
-		unsub := s.unsub
-		s.cancel = nil
-		s.unsub = nil
-		s.mu.Unlock()
-		if cancel != nil {
-			cancel()
-		}
-		if unsub != nil {
-			unsub()
-		}
-		close(s.stopCh)
-	})
 }
 
 // kick wakes the aggregation loop so mode flips take effect without waiting
@@ -146,13 +98,30 @@ func (s *ChannelMonitorV2Aggregator) kick() {
 	}
 }
 
-func (s *ChannelMonitorV2Aggregator) loop() {
-	for {
+func (s *ChannelMonitorV2Aggregator) runShared(parent context.Context) {
+	if s.repo == nil {
+		return
+	}
+	if sub, ok := s.settings.(channelMonitorRuntimeSubscriber); ok && sub != nil {
+		if unsubscribe := sub.SubscribeChannelMonitorRuntime(s.kick); unsubscribe != nil {
+			defer unsubscribe()
+		}
+	}
+	// Another owner may have advanced the cursor while this Entry was idle.
+	s.mu.Lock()
+	s.cursorLoaded = false
+	s.backfillAt = time.Time{}
+	s.hasAggregated = false
+	s.backfillChunk = channelMonitorV2BackfillChunkInit
+	s.backfillFailures = 0
+	s.nextWaitFloor = 0
+	s.mu.Unlock()
+	for parent.Err() == nil {
 		interval := time.Minute
-		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		ctx, cancel := context.WithTimeout(parent, 3*time.Second)
 		if !s.passiveAggregationAllowed(ctx) {
 			cancel()
-			if !s.wait(interval) {
+			if !s.wait(parent, interval) {
 				return
 			}
 			continue
@@ -160,7 +129,7 @@ func (s *ChannelMonitorV2Aggregator) loop() {
 		if cfg, err := s.repo.GetConfig(ctx); err == nil {
 			if !cfg.Enabled {
 				cancel()
-				if !s.wait(interval) {
+				if !s.wait(parent, interval) {
 					return
 				}
 				continue
@@ -170,7 +139,7 @@ func (s *ChannelMonitorV2Aggregator) loop() {
 			}
 		}
 		cancel()
-		s.runOnce()
+		s.runOnceContext(parent)
 		// Hard gate: never compress bootstrap to multi-Hz ticks. Soft gate: on
 		// repeated failures raise the wait floor (exponential backoff).
 		s.mu.Lock()
@@ -179,7 +148,7 @@ func (s *ChannelMonitorV2Aggregator) loop() {
 		if floor > interval {
 			interval = floor
 		}
-		if !s.wait(interval) {
+		if !s.wait(parent, interval) {
 			return
 		}
 	}
@@ -193,7 +162,7 @@ func (s *ChannelMonitorV2Aggregator) passiveAggregationAllowed(ctx context.Conte
 	return s.settings.GetChannelMonitorRuntime(ctx).PassiveAggregationAllowed()
 }
 
-func (s *ChannelMonitorV2Aggregator) wait(interval time.Duration) bool {
+func (s *ChannelMonitorV2Aggregator) wait(ctx context.Context, interval time.Duration) bool {
 	timer := time.NewTimer(interval)
 	defer timer.Stop()
 	select {
@@ -208,18 +177,16 @@ func (s *ChannelMonitorV2Aggregator) wait(interval time.Duration) bool {
 				return true
 			}
 		}
-	case <-s.stopCh:
+	case <-ctx.Done():
 		return false
 	}
 }
 
 func (s *ChannelMonitorV2Aggregator) runOnce() {
-	s.mu.Lock()
-	parent := s.ctx
-	s.mu.Unlock()
-	if parent == nil {
-		parent = context.Background()
-	}
+	s.runOnceContext(context.Background())
+}
+
+func (s *ChannelMonitorV2Aggregator) runOnceContext(parent context.Context) {
 	ctx, cancel := context.WithTimeout(parent, 55*time.Second)
 	defer cancel()
 	release, acquired := tryAcquireSingletonLeaderLock(ctx, nil, s.db, channelMonitorV2AggregatorLockKey, s.instanceID, 2*time.Minute)

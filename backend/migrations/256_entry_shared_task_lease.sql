@@ -1,0 +1,3 @@
+ALTER TABLE entry_shared_task_claim
+    ADD COLUMN lease_expires_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    ADD COLUMN updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();

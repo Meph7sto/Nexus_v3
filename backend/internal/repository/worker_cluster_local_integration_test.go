@@ -187,7 +187,7 @@ func TestWorkerClusterLocalPostgresRedisConvergence(t *testing.T) {
 		}}
 		entry, err := service.NewWorkerClusterService(store, coord, runtime, cfg, func() service.EntryProcessStatus {
 			return service.EntryProcessStatus{Version: "fixture", ActiveConnections: 2, SharedTasksRunning: running}
-		})
+		}, nil)
 		require.NoError(t, err)
 		require.NoError(t, entry.Start(ctx))
 		t.Cleanup(entry.Close)
@@ -228,7 +228,7 @@ func TestWorkerClusterLocalPostgresRedisConvergence(t *testing.T) {
 	require.NotContains(t, join, testWorkerToken)
 	wrongBinding := initial.Desired.Workers[0]
 	wrongBinding.URL = "http://127.0.0.1:1/"
-	_, err = a.UpsertWorker(ctx, wrongBinding, 1)
+	_, err = a.UpsertWorker(ctx, wrongBinding, 1, "")
 	require.ErrorIs(t, err, service.ErrWorkerClusterInvalid)
 
 	policy := initial.Desired.Policy
@@ -319,12 +319,12 @@ func TestWorkerClusterLocalPostgresRedisConvergence(t *testing.T) {
 	broken.Version++
 	broken.Workers[0].Weight = 0
 	require.Error(t, store.Save(ctx, drain.Version, broken))
-	preserved, err := store.Load(ctx)
+	preserved, err := a.View(ctx)
 	require.NoError(t, err)
-	require.Equal(t, drain, preserved, "a bad row rolls back both version and node mutation")
-	renamed := preserved.Workers[0]
+	require.Equal(t, drain, preserved.Desired, "a bad row rolls back both version and node mutation")
+	renamed := preserved.Desired.Workers[0]
 	renamed.Name, renamed.Tags, renamed.Note = "maintained worker", []string{"fixture"}, "maintenance verified"
-	updated, err = a.UpsertWorker(ctx, renamed, drain.Version)
+	updated, err = a.UpsertWorker(ctx, renamed, drain.Version, "")
 	require.NoError(t, err)
 	require.Equal(t, renamed, updated.Workers[0])
 	deleted, err := a.DeleteWorker(ctx, "worker", updated.Version)

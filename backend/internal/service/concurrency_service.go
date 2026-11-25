@@ -229,7 +229,8 @@ const (
 
 // ConcurrencyService 管理账号和用户的并发限制。
 type ConcurrencyService struct {
-	cache ConcurrencyCache
+	slotCleanupWorker sharedTaskRunner
+	cache             ConcurrencyCache
 
 	accountLoadCacheTTL atomic.Int64
 	accountLoadCacheMu  sync.RWMutex
@@ -722,29 +723,26 @@ func (s *ConcurrencyService) CleanupExpiredAccountSlots(ctx context.Context, acc
 
 // StartSlotCleanupWorker starts a background cleanup worker for expired account slots.
 func (s *ConcurrencyService) StartSlotCleanupWorker(_ AccountRepository, interval time.Duration) {
+	if s != nil {
+		s.slotCleanupWorker.start(context.Background(), func(ctx context.Context) {
+			s.runSlotCleanupWorker(ctx, interval)
+		})
+	}
+}
+
+func (s *ConcurrencyService) runSlotCleanupWorker(ctx context.Context, interval time.Duration) {
 	if s == nil || s.cache == nil || interval <= 0 {
 		return
 	}
 
-	runCleanup := func() {
-		cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	runSharedPeriodic(ctx, interval, true, func(ctx context.Context) {
+		cleanupCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		err := s.cache.CleanupExpiredAccountSlotKeys(cleanupCtx)
 		cancel()
 		if err != nil {
 			logger.LegacyPrintf("service.concurrency", "Warning: cleanup expired account slots failed: %v", err)
-			return
 		}
-	}
-
-	go func() {
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
-
-		runCleanup()
-		for range ticker.C {
-			runCleanup()
-		}
-	}()
+	})
 }
 
 // GetAccountConcurrencyBatch gets current concurrency counts for multiple accounts.

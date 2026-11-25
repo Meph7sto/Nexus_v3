@@ -132,9 +132,7 @@ type SchedulerSnapshotService struct {
 	accountRepo                  AccountRepository
 	groupRepo                    GroupRepository
 	cfg                          *config.Config
-	stopCh                       chan struct{}
-	stopOnce                     sync.Once
-	wg                           sync.WaitGroup
+	worker                       sharedTaskRunner
 	fallbackLimit                *fallbackLimiter
 	lagMu                        sync.Mutex
 	lagFailures                  int
@@ -173,49 +171,40 @@ func NewSchedulerSnapshotService(
 		accountRepo:   accountRepo,
 		groupRepo:     groupRepo,
 		cfg:           cfg,
-		stopCh:        make(chan struct{}),
 		fallbackLimit: newFallbackLimiter(maxQPS),
 	}
 }
 
 func (s *SchedulerSnapshotService) Start() {
+	if s != nil {
+		s.worker.start(context.Background(), s.runShared)
+	}
+}
+
+func (s *SchedulerSnapshotService) runShared(ctx context.Context) {
 	if s == nil || s.cache == nil {
 		return
 	}
 
-	s.wg.Add(1)
-	go func() {
-		defer s.wg.Done()
-		s.runInitialRebuild()
-	}()
+	var wg sync.WaitGroup
+	wg.Go(func() { s.runInitialRebuild(ctx) })
 
 	interval := s.outboxPollInterval()
 	if s.outboxRepo != nil && interval > 0 {
-		s.wg.Add(1)
-		go func() {
-			defer s.wg.Done()
-			s.runOutboxWorker(interval)
-		}()
+		wg.Go(func() { runSharedPeriodic(ctx, interval, true, s.pollOutboxContext) })
 	}
 
 	fullInterval := s.fullRebuildInterval()
 	if fullInterval > 0 {
-		s.wg.Add(1)
-		go func() {
-			defer s.wg.Done()
-			s.runFullRebuildWorker(fullInterval)
-		}()
+		wg.Go(func() { s.runFullRebuildWorker(ctx, fullInterval) })
 	}
+	wg.Wait()
 }
 
 func (s *SchedulerSnapshotService) Stop() {
-	if s == nil {
-		return
+	if s != nil {
+		s.worker.stop()
 	}
-	s.stopOnce.Do(func() {
-		close(s.stopCh)
-	})
-	s.wg.Wait()
 }
 
 func (s *SchedulerSnapshotService) ListSchedulableAccounts(ctx context.Context, groupID *int64, platform string, hasForcePlatform bool) ([]Account, bool, error) {
@@ -397,12 +386,12 @@ func (s *SchedulerSnapshotService) UpdateAccountInCache(ctx context.Context, acc
 	return s.cache.SetAccount(ctx, account)
 }
 
-func (s *SchedulerSnapshotService) runInitialRebuild() {
+func (s *SchedulerSnapshotService) runInitialRebuild(parent context.Context) {
 	if s.cache == nil {
 		return
 	}
 	_ = s.coalesceFullRebuild(func() error {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		ctx, cancel := context.WithTimeout(parent, 2*time.Minute)
 		defer cancel()
 		if err := s.rebuildFullSnapshot(ctx, "startup"); err != nil {
 			logger.LegacyPrintf("service.scheduler_snapshot", "[Scheduler] rebuild startup failed: %v", err)
@@ -412,42 +401,23 @@ func (s *SchedulerSnapshotService) runInitialRebuild() {
 	})
 }
 
-func (s *SchedulerSnapshotService) runOutboxWorker(interval time.Duration) {
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-
-	s.pollOutbox()
-	for {
-		select {
-		case <-ticker.C:
-			s.pollOutbox()
-		case <-s.stopCh:
-			return
+func (s *SchedulerSnapshotService) runFullRebuildWorker(ctx context.Context, interval time.Duration) {
+	runSharedPeriodic(ctx, interval, false, func(ctx context.Context) {
+		if err := s.triggerFullRebuildContext(ctx, "interval"); err != nil && ctx.Err() == nil {
+			logger.LegacyPrintf("service.scheduler_snapshot", "[Scheduler] full rebuild failed: %v", err)
 		}
-	}
-}
-
-func (s *SchedulerSnapshotService) runFullRebuildWorker(interval time.Duration) {
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ticker.C:
-			if err := s.triggerFullRebuild("interval"); err != nil {
-				logger.LegacyPrintf("service.scheduler_snapshot", "[Scheduler] full rebuild failed: %v", err)
-			}
-		case <-s.stopCh:
-			return
-		}
-	}
+	})
 }
 
 func (s *SchedulerSnapshotService) pollOutbox() {
+	s.pollOutboxContext(context.Background())
+}
+
+func (s *SchedulerSnapshotService) pollOutboxContext(parent context.Context) {
 	if s.outboxRepo == nil || s.cache == nil {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(parent, 10*time.Second)
 	defer cancel()
 
 	watermark, err := s.cache.GetOutboxWatermark(ctx)
@@ -471,9 +441,14 @@ func (s *SchedulerSnapshotService) pollOutbox() {
 
 	seen := make(map[batchSeenKey]struct{})
 	for _, event := range events {
-		eventCtx, cancel := context.WithTimeout(context.Background(), outboxEventTimeout)
-		err := s.handleOutboxEvent(eventCtx, event, seen)
-		cancel()
+		var err error
+		if event.EventType == SchedulerOutboxEventFullRebuild {
+			err = s.triggerFullRebuildContext(parent, "outbox")
+		} else {
+			eventCtx, cancel := context.WithTimeout(parent, outboxEventTimeout)
+			err = s.handleOutboxEvent(eventCtx, event, seen)
+			cancel()
+		}
 		if err != nil {
 			logger.LegacyPrintf("service.scheduler_snapshot", "[Scheduler] outbox handle failed: id=%d type=%s err=%v", event.ID, event.EventType, err)
 			return
@@ -483,35 +458,39 @@ func (s *SchedulerSnapshotService) pollOutbox() {
 	lastID := events[len(events)-1].ID
 	var wmErr error
 	for i := range 3 {
-		wmCtx, wmCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		wmCtx, wmCancel := context.WithTimeout(parent, 5*time.Second)
 		wmErr = s.cache.SetOutboxWatermark(wmCtx, lastID)
 		wmCancel()
 		if wmErr == nil {
 			break
 		}
 		if i < 2 {
-			time.Sleep(200 * time.Millisecond)
+			sleepOrDone(parent, 200*time.Millisecond)
 		}
 	}
 	if wmErr != nil {
 		logger.LegacyPrintf("service.scheduler_snapshot", "[Scheduler] outbox watermark write failed: %v", wmErr)
 		return
 	}
-	s.cleanupConsumedOutbox(lastID)
+	s.cleanupConsumedOutboxContext(parent, lastID)
 
 	// 只有 watermark 成功推进后，当前批次才算已消费。延迟必须按下一条待消费事件计算，
 	// 否则本批次处理越慢，越容易误触发一次更慢的全量重建，形成正反馈。
-	lagCtx, lagCancel := context.WithTimeout(context.Background(), 5*time.Second)
-	s.checkOutboxLag(lagCtx, lastID)
+	lagCtx, lagCancel := context.WithTimeout(parent, 5*time.Second)
+	s.checkOutboxLagWithParent(lagCtx, parent, lastID)
 	lagCancel()
 }
 
 func (s *SchedulerSnapshotService) cleanupConsumedOutbox(watermark int64) {
+	s.cleanupConsumedOutboxContext(context.Background(), watermark)
+}
+
+func (s *SchedulerSnapshotService) cleanupConsumedOutboxContext(parent context.Context, watermark int64) {
 	if s == nil || s.outboxRepo == nil || watermark <= 0 {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(parent, 10*time.Second)
 	defer cancel()
 
 	lease, acquired, err := s.outboxRepo.TryAcquireCleanupLock(ctx)
@@ -549,7 +528,7 @@ func (s *SchedulerSnapshotService) handleOutboxEvent(ctx context.Context, event 
 	case SchedulerOutboxEventGroupChanged:
 		return s.handleGroupEvent(ctx, event.GroupID, seen)
 	case SchedulerOutboxEventFullRebuild:
-		return s.triggerFullRebuild("outbox")
+		return s.triggerFullRebuildContext(ctx, "outbox")
 	default:
 		return nil
 	}
@@ -1104,11 +1083,15 @@ func (s *SchedulerSnapshotService) setRebuildSnapshot(
 }
 
 func (s *SchedulerSnapshotService) triggerFullRebuild(reason string) error {
+	return s.triggerFullRebuildContext(context.Background(), reason)
+}
+
+func (s *SchedulerSnapshotService) triggerFullRebuildContext(parent context.Context, reason string) error {
 	if s.cache == nil {
 		return ErrSchedulerCacheNotReady
 	}
 	return s.coalesceFullRebuild(func() error {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		ctx, cancel := context.WithTimeout(parent, 2*time.Minute)
 		defer cancel()
 		return s.rebuildFullSnapshot(ctx, reason)
 	})
@@ -1356,6 +1339,10 @@ func (s *SchedulerSnapshotService) coalesceFullRebuild(run func() error) error {
 }
 
 func (s *SchedulerSnapshotService) checkOutboxLag(ctx context.Context, watermark int64) {
+	s.checkOutboxLagWithParent(ctx, ctx, watermark)
+}
+
+func (s *SchedulerSnapshotService) checkOutboxLagWithParent(ctx, rebuildParent context.Context, watermark int64) {
 	if s.cfg == nil || s.outboxRepo == nil {
 		return
 	}
@@ -1466,10 +1453,10 @@ func (s *SchedulerSnapshotService) checkOutboxLag(ctx context.Context, watermark
 	switch reason {
 	case "outbox_lag":
 		logger.LegacyPrintf("service.scheduler_snapshot", "[Scheduler] outbox lag rebuild triggered: lag=%s failures=%d", lag, failures)
-		rebuildErr = s.triggerFullRebuild(reason)
+		rebuildErr = s.triggerFullRebuildContext(rebuildParent, reason)
 	case "outbox_backlog":
 		logger.LegacyPrintf("service.scheduler_snapshot", "[Scheduler] outbox backlog rebuild triggered: backlog=%d", backlog)
-		rebuildErr = s.triggerFullRebuild(reason)
+		rebuildErr = s.triggerFullRebuildContext(rebuildParent, reason)
 	}
 
 	s.lagMu.Lock()

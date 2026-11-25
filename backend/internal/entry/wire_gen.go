@@ -199,7 +199,7 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 	channelMonitorV2Service := service.ProvideChannelMonitorV2Service(channelMonitorV2Repository, settingService)
 	channelMonitorV2Handler := handler.NewChannelMonitorV2Handler(channelMonitorV2Service, apiKeyService)
 	entryEntryProcessState := provideEntryProcessState(buildInfo, sharedTaskGate)
-	workerClusterService, err := provideWorkerCluster(configConfig, db, redisClient, httpUpstream, entryEntryProcessState)
+	workerClusterService, err := provideWorkerCluster(configConfig, db, redisClient, httpUpstream, entryEntryProcessState, secretEncryptor)
 	if err != nil {
 		return nil, err
 	}
@@ -384,7 +384,7 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 	channelMonitorRunner := service.ProvideChannelMonitorRunner(channelMonitorService, settingService, channelMonitorQuotaFetcher, sharedTaskGate)
 	channelMonitorV2Aggregator := service.ProvideChannelMonitorV2Aggregator(channelMonitorV2Repository, db, settingService, sharedTaskGate)
 	userPlatformQuotaUsageFlusher := service.ProvideUserPlatformQuotaUsageFlusher(configConfig, billingCache, serviceUserPlatformQuotaRepository, timingWheelService)
-	v := provideCleanup(client, redisClient, opsMetricsCollector, opsAggregationService, opsAlertEvaluatorService, opsCleanupService, opsScheduledReportService, opsSystemLogSink, opsService, opsIngressRejectAggregator, apiKeyService, authCacheInvalidationWorker, schedulerSnapshotService, tokenRefreshService, accountExpiryService, cnProviderBalanceCheckService, openAICodexVersionSyncService, claudeCodeVersionSyncService, proxyExpiryService, subscriptionExpiryService, monthlyLedgerService, usageCleanupService, idempotencyCleanupService, geminiCachedContentService, batchImageCleanupService, batchImageWorkerRuntime, pricingService, emailQueueService, billingCacheService, usageRecordWorkerPool, usageBillingLaneCombiner, balanceNotifyService, digestSessionStore, subscriptionService, oAuthService, openAIOAuthService, geminiOAuthService, antigravityOAuthService, grokOAuthService, openAIGatewayService, scheduledTestRunnerService, backupService, paymentOrderExpiryService, channelMonitorRunner, channelMonitorV2Aggregator, userPlatformQuotaUsageFlusher, upstreamBillingProbeService, ollamaCloudUsageService, openCodeGoUsageService, auditLogService, openAIQuotaAutoResetService, promptService, pluginManager, httpUpstream, workerClusterService, sharedTaskGate)
+	v := provideCleanup(client, redisClient, opsMetricsCollector, opsAggregationService, opsAlertEvaluatorService, opsCleanupService, opsScheduledReportService, opsSystemLogSink, opsService, opsIngressRejectAggregator, apiKeyService, authCacheInvalidationWorker, schedulerSnapshotService, tokenRefreshService, accountExpiryService, cnProviderBalanceCheckService, openAICodexVersionSyncService, claudeCodeVersionSyncService, proxyExpiryService, subscriptionExpiryService, monthlyLedgerService, usageCleanupService, idempotencyCleanupService, geminiCachedContentService, batchImageCleanupService, batchImageWorkerRuntime, pricingService, emailQueueService, billingCacheService, usageRecordWorkerPool, usageBillingLaneCombiner, balanceNotifyService, digestSessionStore, subscriptionService, oAuthService, openAIOAuthService, geminiOAuthService, antigravityOAuthService, grokOAuthService, openAIGatewayService, scheduledTestRunnerService, backupService, paymentOrderExpiryService, channelMonitorRunner, channelMonitorV2Aggregator, userPlatformQuotaUsageFlusher, upstreamBillingProbeService, ollamaCloudUsageService, openCodeGoUsageService, auditLogService, openAIQuotaAutoResetService, promptService, pluginManager, httpUpstream, workerClusterService, sharedTaskGate, settingService)
 	application := &Application{
 		Server:        httpServer,
 		PromptAudit:   promptService,
@@ -407,7 +407,7 @@ type Application struct {
 	Cleanup       func()
 }
 
-func provideWorkerCluster(cfg *config.Config, db *sql.DB, rdb *redis.Client, upstream service.HTTPUpstream, process *entryProcessState) (*service.WorkerClusterService, error) {
+func provideWorkerCluster(cfg *config.Config, db *sql.DB, rdb *redis.Client, upstream service.HTTPUpstream, process *entryProcessState, encryptor service.SecretEncryptor) (*service.WorkerClusterService, error) {
 	if !cfg.EntryNode.ClusterEnabled {
 		return nil, nil
 	}
@@ -415,9 +415,10 @@ func provideWorkerCluster(cfg *config.Config, db *sql.DB, rdb *redis.Client, ups
 	if !ok {
 		return nil, errors.New("Worker cluster requires a reloadable Worker transport")
 	}
-	clusterConfig := config.Config{EntryNode: cfg.EntryNode, WorkerPool: cfg.WorkerPool}
+	clusterConfig := config.Config{EntryNode: cfg.EntryNode, WorkerPool: cfg.WorkerPool,
+		Totp: config.TotpConfig{EncryptionKeyConfigured: cfg.Totp.EncryptionKeyConfigured}}
 	clusterConfig.WorkerPool.DrainTimeout = time.Duration(cfg.Gateway.StreamDataIntervalTimeout) * time.Second
-	return service.NewWorkerClusterService(repository.NewWorkerNodeStore(db), repository.NewWorkerClusterCoordination(rdb), runtime, &clusterConfig, process.status)
+	return service.NewWorkerClusterService(repository.NewWorkerNodeStore(db), repository.NewWorkerClusterCoordination(rdb), runtime, &clusterConfig, process.status, encryptor)
 }
 
 func providePrivacyClientFactory() service.PrivacyClientFactory {
@@ -495,12 +496,14 @@ func provideCleanup(
 	httpUpstream service.HTTPUpstream,
 	cluster *service.WorkerClusterService,
 	sharedTasks *service.SharedTaskGate,
+	settings *service.SettingService,
 ) func() {
 	return func() {
+		settings.StopSettingsBroadcast()
 		if cluster != nil {
 			cluster.Close()
 		}
-		defer sharedTasks.Stop()
+		sharedTasks.Stop()
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 

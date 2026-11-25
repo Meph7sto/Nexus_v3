@@ -135,6 +135,10 @@ func (s *BatchImageCleanupService) RunOnce(ctx context.Context, now time.Time) (
 }
 
 func (s *BatchImageCleanupService) Start() {
+	s.startContext(context.Background())
+}
+
+func (s *BatchImageCleanupService) startContext(parent context.Context) {
 	if s == nil || s.Repo == nil || s.Config == nil || !s.Config.BatchImage.Enabled || s.cleanupInterval() <= 0 {
 		return
 	}
@@ -143,7 +147,7 @@ func (s *BatchImageCleanupService) Start() {
 	if s.cancel != nil {
 		return
 	}
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(parent)
 	s.cancel = cancel
 	s.done = make(chan struct{})
 	go func() {
@@ -166,17 +170,17 @@ func (s *BatchImageCleanupService) Stop() {
 		return
 	}
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	cancel := s.cancel
 	done := s.done
-	s.cancel = nil
-	s.done = nil
-	s.mu.Unlock()
 	if cancel != nil {
 		cancel()
 	}
 	if done != nil {
 		<-done
 	}
+	s.cancel = nil
+	s.done = nil
 }
 
 func (s *BatchImageCleanupService) cleanupJob(ctx context.Context, job *BatchImageJob, target CleanupTarget, reason string) error {
