@@ -832,12 +832,24 @@ func (s *AccountTestService) fetchUpstreamModelListRequest(ctx context.Context, 
 		return models, nil, nil, err
 	}
 
+	var proxyURL string
+	if account.IsOpenAI() {
+		// Agent Identity authentication can make an outbound request while building headers.
+		var err error
+		proxyURL, err = accountEgressProxyURL(account)
+		if err != nil {
+			return nil, nil, nil, newUpstreamModelSyncConfigError("Configured account proxy is unavailable", err)
+		}
+	} else {
+		proxyURL = upstreamModelsProxyURL(account)
+	}
+
 	req, err := s.buildUpstreamModelsRequest(ctx, account)
 	if err != nil {
 		return nil, nil, nil, err
 	}
 
-	body, err := s.readUpstreamModelsResponse(req, account)
+	body, err := s.readUpstreamModelsResponse(req, proxyURL, account)
 	if err != nil {
 		return nil, nil, req, err
 	}
@@ -883,8 +895,8 @@ func (s *AccountTestService) keepGrokCatalogFailure(ctx context.Context, account
 }
 
 // readUpstreamModelsResponse 发送模型列表请求并读取受限大小的响应体；非 2xx 返回带状态码的同步错误。
-func (s *AccountTestService) readUpstreamModelsResponse(req *http.Request, account *Account) ([]byte, error) {
-	resp, err := s.doUpstreamModelsRequest(req, upstreamModelsProxyURL(account), account)
+func (s *AccountTestService) readUpstreamModelsResponse(req *http.Request, proxyURL string, account *Account) ([]byte, error) {
+	resp, err := s.doUpstreamModelsRequest(req, proxyURL, account)
 	if err != nil {
 		return nil, newUpstreamModelSyncUpstreamError("Failed to request upstream model list", err)
 	}
@@ -942,7 +954,7 @@ func (s *AccountTestService) fetchVertexGeminiUpstreamModels(ctx context.Context
 		req.Header.Set("Accept", "application/json")
 		req.Header.Set("Authorization", "Bearer "+accessToken)
 
-		body, err := s.readUpstreamModelsResponse(req, account)
+		body, err := s.readUpstreamModelsResponse(req, upstreamModelsProxyURL(account), account)
 		if err != nil {
 			// 只有首页的 404/405 表示列表端点不可用；翻页途中的失败不触发配置模型回退。
 			var syncErr *UpstreamModelSyncError

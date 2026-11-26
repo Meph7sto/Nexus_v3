@@ -286,6 +286,55 @@ func TestFetchUpstreamSupportedModelsParsesOpenAIOAuthManifest(t *testing.T) {
 	require.Equal(t, "Bearer openai-oauth-token", upstream.lastReq.Header.Get("Authorization"))
 }
 
+func TestSyncUpstreamModelCatalogOpenAIUsesBoundProxy(t *testing.T) {
+	proxy := &Proxy{ID: 7, Protocol: "socks5", Host: "127.0.0.1", Port: 1080, Status: StatusActive}
+	for _, tc := range []struct {
+		name    string
+		proxyID *int64
+		loaded  *Proxy
+		blocked bool
+	}{
+		{"missing proxy", &proxy.ID, nil, true},
+		{"wrong proxy", &proxy.ID, &Proxy{ID: 8, Protocol: "socks5", Host: "127.0.0.1", Port: 1080, Status: StatusActive}, true},
+		{"invalid proxy", &proxy.ID, &Proxy{ID: proxy.ID, Protocol: "socks5", Host: "127.0.0.1", Status: StatusActive}, true},
+		{"valid proxy", &proxy.ID, proxy, false},
+		{"unbound", nil, nil, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			manifest := `{"models":[{"slug":"gpt-5.6-sol","reasoning":false,"input_modalities":["text"],"context_window":128000}]}`
+			upstream := &httpUpstreamRecorder{resp: &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader(manifest)),
+			}}
+			svc := &AccountTestService{httpUpstream: upstream, cfg: upstreamModelSyncTestConfig()}
+			account := &Account{
+				ID:          12,
+				Platform:    PlatformOpenAI,
+				Type:        AccountTypeOAuth,
+				ProxyID:     tc.proxyID,
+				Proxy:       tc.loaded,
+				Credentials: map[string]any{"access_token": "test-access-token"},
+			}
+
+			catalog, err := svc.SyncUpstreamModelCatalog(t.Context(), account)
+			if tc.blocked {
+				require.Empty(t, upstream.requests, "an unavailable bound proxy must prevent all outbound calls")
+				require.ErrorIs(t, err, ErrAccountProxyUnavailable)
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, []string{"gpt-5.6-sol"}, catalog.Models)
+			require.Len(t, upstream.requests, 1)
+			require.Equal(t, "Bearer test-access-token", upstream.lastReq.Header.Get("Authorization"))
+			if tc.proxyID == nil {
+				require.Empty(t, upstream.lastProxyURL)
+			} else {
+				require.Equal(t, proxy.URL(), upstream.lastProxyURL)
+			}
+		})
+	}
+}
+
 func TestExtractGrokUpstreamModelIDs(t *testing.T) {
 	t.Parallel()
 

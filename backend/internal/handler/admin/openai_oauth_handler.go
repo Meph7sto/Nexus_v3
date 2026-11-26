@@ -11,6 +11,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/handler/dto"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/adminaccess"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/proxyurl"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/response"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 
@@ -217,12 +218,14 @@ func (h *OpenAIOAuthHandler) RefreshToken(c *gin.Context) {
 	var proxyURL string
 	if req.ProxyID != nil {
 		proxy, err := h.adminService.GetProxy(c.Request.Context(), *req.ProxyID)
-		if scoped && (err != nil || proxy == nil || !proxy.IsActive() || proxy.IsExpired(time.Now())) {
+		if err != nil || proxy == nil || proxy.ID != *req.ProxyID || !proxy.IsActive() || proxy.IsExpired(time.Now()) {
 			response.BadRequest(c, "代理不可用")
 			return
 		}
-		if err == nil && proxy != nil {
-			proxyURL = proxy.URL()
+		proxyURL = proxy.URL()
+		if _, parsed, err := proxyurl.Parse(proxyURL); err != nil || parsed == nil || proxy.Port < 1 || proxy.Port > 65535 {
+			response.BadRequest(c, "代理不可用")
+			return
 		}
 	}
 
